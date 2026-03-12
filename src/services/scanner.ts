@@ -71,19 +71,19 @@ export class Scanner {
             const waveId = await saveWave(wave);
 
             // Notify Telegram
-            await telegram.notifyWaveDetected({
-              symbol: wave.symbol,
-              timeframe: wave.timeframe,
-              direction: wave.direction,
-              shape: wave.shape,
-              isPerfect: wave.isPerfect,
-              entryPrice: wave.entryPrice,
-              stopLoss: wave.stopLoss,
-              target1: wave.target1,
-              target2: wave.target2,
-              target3: wave.target3,
-              ema50: wave.ema50,
-            });
+            // await telegram.notifyWaveDetected({
+            //   symbol: wave.symbol,
+            //   timeframe: wave.timeframe,
+            //   direction: wave.direction,
+            //   shape: wave.shape,
+            //   isPerfect: wave.isPerfect,
+            //   entryPrice: wave.entryPrice,
+            //   stopLoss: wave.stopLoss,
+            //   target1: wave.target1,
+            //   target2: wave.target2,
+            //   target3: wave.target3,
+            //   ema50: wave.ema50,
+            // });
 
             // Open trade
             const availableCapital = await this.getAvailableCapital();
