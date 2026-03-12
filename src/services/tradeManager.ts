@@ -159,6 +159,129 @@ export class TradeService {
     };
   }
 
+  // ─── Reconcile open trades against the exchange on startup (real mode only) ──
+  //
+  // On restart we don't know if any SL/TP orders were filled while the bot
+  // was down. This method queries the exchange for every order ID stored in
+  // the DB and updates trade state accordingly before the scan loop begins.
+
+  async reconcileOpenTrades(): Promise<void> {
+    if (this.mode !== 'real') return;
+
+    const db = await getDb();
+    const openTrades = await db
+      .select()
+      .from(trades)
+      .where(and(eq(trades.status, 'open'), eq(trades.mode, 'real')));
+
+    if (openTrades.length === 0) {
+      logger.info('Reconciliation: no open real trades found');
+      return;
+    }
+
+    logger.info(`Reconciliation: checking ${openTrades.length} open trade(s) against exchange`);
+
+    for (const trade of openTrades) {
+      try {
+        await this.reconcileTrade(trade);
+      } catch (err) {
+        logger.error(`Reconciliation failed for trade #${trade.id}`, err);
+      }
+    }
+
+    logger.info('Reconciliation complete');
+  }
+
+  private async reconcileTrade(trade: typeof trades.$inferSelect): Promise<void> {
+    const db     = await getDb();
+    const isLong = trade.side === 'long';
+    const qty    = Number(trade.quantity);
+    const entry  = Number(trade.entryPrice);
+
+    // ── Check SL order ────────────────────────────────────────────────────────
+    if (trade.slOrderId) {
+      const slOrder = await this.exchange.getOrder(trade.symbol, trade.slOrderId);
+
+      if (slOrder.status === 'filled') {
+        const fillPrice = slOrder.filledPrice ?? Number(trade.stopLoss);
+        const remaining = qty
+          - Number(trade.closedQty1)
+          - Number(trade.closedQty2)
+          - Number(trade.closedQty3)
+          - Number(trade.closedQty4);
+        const pnl = this.calcPnl(entry, fillPrice, remaining, isLong);
+
+        await this.closeTrade(trade.id!, fillPrice, 'sl', pnl);
+        await db.update(wolfeWaves)
+          .set({ hitStopLoss: true })
+          .where(eq(wolfeWaves.id, trade.wolfeWaveId));
+
+        logger.info(`Reconciliation: trade #${trade.id} SL was filled at ${fillPrice} — closed`);
+        return; // no need to check TPs
+      }
+
+      if (slOrder.status === 'cancelled') {
+        // SL was cancelled externally — log and cancel our DB record too
+        logger.warn(`Reconciliation: trade #${trade.id} SL order was cancelled externally`);
+        await db.update(trades)
+          .set({ slOrderId: null })
+          .where(eq(trades.id, trade.id!));
+      }
+    }
+
+    // ── Check TP1 order ───────────────────────────────────────────────────────
+    if (trade.tp1OrderId && Number(trade.closedQty1) === 0) {
+      const tp1Order = await this.exchange.getOrder(trade.symbol, trade.tp1OrderId);
+
+      if (tp1Order.status === 'filled') {
+        const fillPrice  = tp1Order.filledPrice ?? Number(trade.target1);
+        const partialQty = qty * 0.5;
+
+        await db.update(trades).set({
+          closedQty1: partialQty.toFixed(8),
+          stopLoss:   entry.toFixed(8),         // move SL to breakeven
+        }).where(eq(trades.id, trade.id!));
+
+        await db.update(wolfeWaves)
+          .set({ reachedTarget1: true })
+          .where(eq(wolfeWaves.id, trade.wolfeWaveId));
+
+        logger.info(`Reconciliation: trade #${trade.id} TP1 was filled at ${fillPrice}`);
+      }
+    }
+
+    // ── Check TP2 order ───────────────────────────────────────────────────────
+    if (trade.tp2OrderId && Number(trade.closedQty2) === 0) {
+      const tp2Order = await this.exchange.getOrder(trade.symbol, trade.tp2OrderId);
+
+      if (tp2Order.status === 'filled') {
+        const fillPrice = tp2Order.filledPrice ?? Number(trade.target2);
+        const hasTP3    = trade.target3 != null;
+
+        if (hasTP3) {
+          // Fat M/W: partial close at TP2
+          const partialQty = (qty - Number(trade.closedQty1)) * 0.5;
+          await db.update(trades)
+            .set({ closedQty2: partialQty.toFixed(8) })
+            .where(eq(trades.id, trade.id!));
+          await db.update(wolfeWaves)
+            .set({ reachedTarget2: true })
+            .where(eq(wolfeWaves.id, trade.wolfeWaveId));
+          logger.info(`Reconciliation: trade #${trade.id} TP2 (fat) filled at ${fillPrice}`);
+        } else {
+          // Standard wave: full close at TP2
+          const remaining = qty - Number(trade.closedQty1);
+          const pnl = this.calcPnl(entry, fillPrice, remaining, isLong);
+          await this.closeTrade(trade.id!, fillPrice, 'tp2', pnl);
+          await db.update(wolfeWaves)
+            .set({ reachedTarget2: true })
+            .where(eq(wolfeWaves.id, trade.wolfeWaveId));
+          logger.info(`Reconciliation: trade #${trade.id} TP2 was filled at ${fillPrice} — closed`);
+        }
+      }
+    }
+  }
+
   // ─── Monitor open trades against latest price ───────────────────────────────
 
   async checkOpenTrades(currentPrices: Record<string, number>): Promise<void> {

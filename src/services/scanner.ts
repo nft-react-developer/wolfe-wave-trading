@@ -1,6 +1,6 @@
 import type { IExchange } from '../types';
 import { detectWolfeWaves } from '../strategies/wolfeDetector';
-import { saveWave, waveAlreadyExists } from './waveRepository';
+import { saveWave, waveAlreadyExists } from '../services/waveRepository';
 import { TradeService } from '../services/tradeManager';
 import { telegram } from '../services/telegram';
 import { config } from '../utils/config';
@@ -29,8 +29,13 @@ export class Scanner {
       interval: config.scanIntervalMs,
     });
 
-    void this.scan(); // first run immediately
-    this.timer = setInterval(() => void this.scan(), config.scanIntervalMs);
+    // In real mode: reconcile open trades against the exchange before
+    // the first scan so any fills that happened while the bot was down
+    // are reflected in the DB before we start evaluating prices again.
+    void this.tradeService.reconcileOpenTrades().then(() => {
+      void this.scan();
+      this.timer = setInterval(() => void this.scan(), config.scanIntervalMs);
+    });
   }
 
   stop() {
