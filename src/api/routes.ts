@@ -4,11 +4,11 @@ import { getDb, schema } from '../db/connection';
 import { eq, and, desc, gte, lte } from 'drizzle-orm';
 import { config } from '../utils/config';
 import { logger } from '../utils/logger';
-import type { TradeMode } from '../types';
+import type { IExchange, TradeMode } from '../types';
 
 const { wolfeWaves, trades, accountSnapshots } = schema;
 
-export function createRouter() {
+export function createRouter(exchange: IExchange) {
   const router = express.Router();
 
   // ─── Health ───────────────────────────────────────────────────────────────
@@ -290,14 +290,30 @@ export function createRouter() {
     }
   });
 
+  // ─── Account balance ──────────────────────────────────────────────────────
+ 
+  /**
+   * GET /api/account/balance
+   * Returns available balances from the exchange (real or paper).
+   */
+  router.get('/account/balance', async (_req, res) => {
+    try {
+      const balances = await exchange.getBalance();
+      res.json({ exchange: exchange.getName(), data: balances });
+    } catch (err) {
+      logger.error('GET /account/balance error', err);
+      res.status(500).json({ error: 'Failed to fetch balance' });
+    }
+  });
+
   return router;
 }
 
-export function createApp() {
+export function createApp(exchange: IExchange) {
   const app = express();
   app.use(express.json());
 
-  const router = createRouter();
+  const router = createRouter(exchange);
   app.use('/api', router);
 
   // 404 handler
