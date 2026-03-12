@@ -1,7 +1,7 @@
 import type { IExchange } from '../types';
 import { detectWolfeWaves } from '../strategies/wolfeDetector';
 import { saveWave, waveAlreadyExists } from '../services/waveRepository';
-import { TradeService } from '../services/tradeManager';
+import { TradeService, RiskGuard } from '../services/tradeManager';
 import { telegram } from '../services/telegram';
 import { config } from '../utils/config';
 import { logger } from '../utils/logger';
@@ -15,8 +15,11 @@ export class Scanner {
   private timer: NodeJS.Timeout | null = null;
   private tradeService: TradeService;
 
+  private riskGuard: RiskGuard;
+
   constructor(private exchange: IExchange) {
     this.tradeService = new TradeService(exchange, config.tradingMode);
+    this.riskGuard = new RiskGuard(config.tradingMode);
   }
 
   start() {
@@ -50,6 +53,13 @@ export class Scanner {
   private async scan() {
     logger.debug('Scan cycle started');
 
+    // Check daily drawdown — pauses new trade detection if limit is exceeded
+    await this.riskGuard.checkDailyDrawdown();
+    const paused = this.riskGuard.isPaused();
+    if (paused) {
+      logger.warn('New trade detection paused by RiskGuard (daily loss limit)');
+    }
+
     // Collect current prices for trade monitoring
     const currentPrices: Record<string, number> = {};
 
@@ -63,7 +73,9 @@ export class Scanner {
           const latestClose = candles[candles.length - 1].close;
           currentPrices[symbol] = latestClose;
 
-          // Detect Wolfe Waves
+          // Detect Wolfe Waves — skipped when bot is paused
+          if (paused) continue;
+
           const waves = detectWolfeWaves(candles, symbol, timeframe);
 
           for (const wave of waves) {
@@ -89,6 +101,13 @@ export class Scanner {
             //   target3: wave.target3,
             //   ema50: wave.ema50,
             // });
+
+            // Risk checks before opening a trade
+            const riskCheck = await this.riskGuard.canOpenTrade(wave.symbol);
+            if (!riskCheck.allowed) {
+              logger.warn(`Trade skipped: ${riskCheck.reason}`, { symbol: wave.symbol });
+              continue;
+            }
 
             // Open trade
             const availableCapital = await this.getAvailableCapital();

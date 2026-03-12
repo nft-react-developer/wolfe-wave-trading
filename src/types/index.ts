@@ -198,4 +198,8 @@ export interface AppConfig {
   emaPeriod: number;
   apiPort: number;
   dailyReportCron: string;
+  // Risk management parameters
+  maxOpenTradesTotal: number;     // Max total open trades (0 = no limit)
+  maxOpenTradesPerSymbol: number; // Max open trades per symbol (0 = no limit)
+  maxDailyLossPct: number;        // Max daily loss as % of initial capital (0 = no limit)
 }

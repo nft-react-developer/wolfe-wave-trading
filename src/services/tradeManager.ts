@@ -1,4 +1,4 @@
-import { eq, and } from 'drizzle-orm';
+import { eq, and, gte, sql } from 'drizzle-orm';
 import type { WolfeWave, Trade, TradeMode } from '../types';
 import { getDb, schema } from '../db/connection';
 import type { NewTradeRow } from '../db/schema';
@@ -7,6 +7,107 @@ import { config } from '../utils/config';
 import { logger } from '../utils/logger';
 
 const { trades, wolfeWaves } = schema;
+
+// ─── Risk Guard ───────────────────────────────────────────────────────────────
+
+export class RiskGuard {
+  private paused = false;
+
+  constructor(private mode: TradeMode) {}
+
+  isPaused(): boolean { return this.paused; }
+
+  resume(): void {
+    this.paused = false;
+    logger.info('RiskGuard: bot resumed');
+  }
+
+  /**
+   * Check whether opening a new trade is allowed.
+   * Returns { allowed: true } or { allowed: false, reason: string }.
+   */
+  async canOpenTrade(symbol: string): Promise<{ allowed: boolean; reason?: string }> {
+    if (this.paused) {
+      return { allowed: false, reason: 'Bot is paused due to daily loss limit' };
+    }
+
+    const db = await getDb();
+
+    // ── Total open trades limit ──────────────────────────────────────────────
+    if (config.maxOpenTradesTotal > 0) {
+      const [{ count }] = await db
+        .select({ count: sql<number>`count(*)` })
+        .from(trades)
+        .where(and(eq(trades.status, 'open'), eq(trades.mode, this.mode)));
+
+      if (Number(count) >= config.maxOpenTradesTotal) {
+        return {
+          allowed: false,
+          reason: `Max open trades reached (${config.maxOpenTradesTotal})`,
+        };
+      }
+    }
+
+    // ── Per-symbol open trades limit ─────────────────────────────────────────
+    if (config.maxOpenTradesPerSymbol > 0) {
+      const [{ count }] = await db
+        .select({ count: sql<number>`count(*)` })
+        .from(trades)
+        .where(and(
+          eq(trades.status, 'open'),
+          eq(trades.mode, this.mode),
+          eq(trades.symbol, symbol),
+        ));
+
+      if (Number(count) >= config.maxOpenTradesPerSymbol) {
+        return {
+          allowed: false,
+          reason: `Max open trades for ${symbol} reached (${config.maxOpenTradesPerSymbol})`,
+        };
+      }
+    }
+
+    return { allowed: true };
+  }
+
+  /**
+   * Calculate today's realized PnL and pause the bot if it exceeds
+   * the configured daily loss threshold.
+   * Call once per scan cycle.
+   */
+  async checkDailyDrawdown(): Promise<void> {
+    if (config.maxDailyLossPct <= 0) return;
+
+    const db = await getDb();
+
+    const startOfDay = new Date();
+    startOfDay.setUTCHours(0, 0, 0, 0);
+
+    const closedToday = await db
+      .select({ pnl: trades.pnl })
+      .from(trades)
+      .where(and(
+        eq(trades.status, 'closed'),
+        eq(trades.mode, this.mode),
+        gte(trades.exitTime, startOfDay.getTime()),
+      ));
+
+    const dailyPnl = closedToday.reduce((sum, t) => sum + Number(t.pnl ?? 0), 0);
+
+    // dailyPnl is negative when losing
+    const lossThreshold = -Math.abs(config.initialCapital * config.maxDailyLossPct);
+
+    if (dailyPnl <= lossThreshold && !this.paused) {
+      this.paused = true;
+      logger.warn('RiskGuard: daily loss limit hit — bot paused', {
+        dailyPnl: dailyPnl.toFixed(2),
+        threshold: lossThreshold.toFixed(2),
+        pct: (config.maxDailyLossPct * 100).toFixed(1) + '%',
+      });
+    }
+  }
+}
+
 
 // ─── Position sizing ──────────────────────────────────────────────────────────
 
