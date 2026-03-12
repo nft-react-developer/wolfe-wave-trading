@@ -138,3 +138,6 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vscode
+files/.DS_Store
+.DS_Store
+env.example

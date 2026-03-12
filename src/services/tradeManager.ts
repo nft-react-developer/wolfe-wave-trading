@@ -1,0 +1,385 @@
+import { eq, and } from 'drizzle-orm';
+import type { WolfeWave, Trade, TradeMode } from '../types';
+import { getDb, schema } from '../db/connection';
+import type { NewTradeRow } from '../db/schema';
+import type { IExchange } from '../types';
+import { config } from '../utils/config';
+import { logger } from '../utils/logger';
+
+const { trades, wolfeWaves } = schema;
+
+// ─── Position sizing ──────────────────────────────────────────────────────────
+
+export function calcPositionSize(
+  entryPrice: number,
+  stopLoss: number,
+  availableCapital: number,
+): { usdAmount: number; quantity: number } {
+  const riskPct    = 0.01; // risk 1% of capital per trade
+  const riskAmount = Math.min(availableCapital * riskPct, config.maxTradeAmount);
+
+  const priceDiff = Math.abs(entryPrice - stopLoss);
+  if (priceDiff === 0) return { usdAmount: 0, quantity: 0 };
+
+  const quantity  = riskAmount / priceDiff;
+  const usdAmount = quantity * entryPrice;
+
+  // Hard cap
+  const cappedUsd = Math.min(usdAmount, config.maxTradeAmount);
+  const cappedQty = cappedUsd / entryPrice;
+
+  return { usdAmount: cappedUsd, quantity: cappedQty };
+}
+
+// ─── Trade service ────────────────────────────────────────────────────────────
+
+export class TradeService {
+  constructor(
+    private exchange: IExchange,
+    private mode: TradeMode,
+  ) {}
+
+  // ─── Open a trade from a Wolfe Wave ────────────────────────────────────────
+
+  async openTrade(
+    wave: WolfeWave,
+    waveId: number,
+    availableCapital: number,
+  ): Promise<Trade | null> {
+    const db = await getDb();
+
+    const { usdAmount, quantity } = calcPositionSize(
+      wave.entryPrice,
+      wave.stopLoss,
+      availableCapital,
+    );
+
+    if (quantity <= 0 || usdAmount < 1) {
+      logger.warn('Skipping trade: position size too small', { symbol: wave.symbol, usdAmount });
+      return null;
+    }
+
+    // side / orderSide — typed as literals so Drizzle is happy
+    const side:      'long' | 'short' = wave.direction === 'bullish' ? 'long' : 'short';
+    const orderSide: 'buy'  | 'sell'  = side === 'long' ? 'buy' : 'sell';
+
+    let entryOrderId: string | undefined;
+    let slOrderId:    string | undefined;
+
+    try {
+      const entryOrder = await this.exchange.placeOrder({
+        symbol:   wave.symbol,
+        side:     orderSide,
+        type:     'market',
+        quantity,
+        price:    wave.entryPrice,
+      });
+      entryOrderId = entryOrder.orderId;
+
+      // SL order — only placed in real mode (paper tracks it manually)
+      if (this.mode === 'real') {
+        const slOrder = await this.exchange.placeOrder({
+          symbol:   wave.symbol,
+          side:     orderSide === 'buy' ? 'sell' : 'buy',
+          type:     'limit',
+          quantity,
+          price:    wave.stopLoss,
+        });
+        slOrderId = slOrder.orderId;
+      }
+    } catch (err) {
+      logger.error('Failed to place entry order', err);
+      return null;
+    }
+
+    const now = Date.now();
+
+    // Build the insert record using NewTradeRow so every enum field is
+    // typed as the literal union that Drizzle expects (not just `string`).
+    const tradeRecord: NewTradeRow = {
+      wolfeWaveId:  waveId,
+      symbol:       wave.symbol,
+      timeframe:    wave.timeframe,
+      side,                          // 'long' | 'short'  ✓
+      mode:         this.mode,       // 'paper' | 'real'  ✓
+      status:       'open',          // enum literal       ✓
+      entryPrice:   wave.entryPrice.toFixed(8),
+      entryTime:    now,
+      quantity:     quantity.toFixed(8),
+      usdAmount:    usdAmount.toFixed(2),
+      stopLoss:     wave.stopLoss.toFixed(8),
+      target1:      wave.target1.toFixed(8),
+      target2:      wave.target2.toFixed(8),
+      target3:      wave.target3?.toFixed(8),
+      target4:      wave.target4?.toFixed(8),
+      closedQty1:   '0',
+      closedQty2:   '0',
+      closedQty3:   '0',
+      closedQty4:   '0',
+      entryOrderId,
+      slOrderId,
+    };
+
+    const [result] = await db.insert(trades).values(tradeRecord);
+
+    logger.info('Trade opened', {
+      id:     result.insertId,
+      symbol: wave.symbol,
+      side,
+      mode:   this.mode,
+      entry:  wave.entryPrice,
+      sl:     wave.stopLoss,
+      tp1:    wave.target1,
+      tp2:    wave.target2,
+    });
+
+    return {
+      id:           result.insertId,
+      wolfeWaveId:  waveId,
+      symbol:       wave.symbol,
+      timeframe:    wave.timeframe,
+      side,
+      mode:         this.mode,
+      status:       'open',
+      entryPrice:   wave.entryPrice,
+      entryTime:    now,
+      quantity,
+      usdAmount,
+      stopLoss:     wave.stopLoss,
+      target1:      wave.target1,
+      target2:      wave.target2,
+      target3:      wave.target3,
+      target4:      wave.target4,
+      closedQty1:   0,
+      closedQty2:   0,
+      closedQty3:   0,
+      closedQty4:   0,
+      entryOrderId,
+      slOrderId,
+    };
+  }
+
+  // ─── Monitor open trades against latest price ───────────────────────────────
+
+  async checkOpenTrades(currentPrices: Record<string, number>): Promise<void> {
+    const db = await getDb();
+
+    const openTrades = await db
+      .select()
+      .from(trades)
+      .where(and(eq(trades.status, 'open'), eq(trades.mode, this.mode)));
+
+    for (const trade of openTrades) {
+      const price = currentPrices[trade.symbol];
+      if (price === undefined) continue;
+      await this.evaluateTrade(trade, price);
+    }
+  }
+
+  // ─── Evaluate a single trade ────────────────────────────────────────────────
+
+  private async evaluateTrade(
+    trade: typeof trades.$inferSelect,
+    currentPrice: number,
+  ): Promise<void> {
+    const db = await getDb();
+
+    const entry = Number(trade.entryPrice);
+    const sl    = Number(trade.stopLoss);
+    const tp1   = Number(trade.target1);
+    const tp2   = Number(trade.target2);
+    const tp3   = trade.target3 != null ? Number(trade.target3) : undefined;
+    const tp4   = trade.target4 != null ? Number(trade.target4) : undefined;
+    const qty   = Number(trade.quantity);
+
+    const closedQty1 = Number(trade.closedQty1);
+    const closedQty2 = Number(trade.closedQty2);
+    const closedQty3 = Number(trade.closedQty3);
+    const closedQty4 = Number(trade.closedQty4);
+
+    const isLong = trade.side === 'long';
+
+    // ── Stop Loss ───────────────────────────────────────────────────────────
+    const slHit = isLong ? currentPrice <= sl : currentPrice >= sl;
+    if (slHit) {
+      const remaining = qty - closedQty1 - closedQty2 - closedQty3 - closedQty4;
+      const pnl = this.calcPnl(entry, currentPrice, remaining, isLong);
+      await this.closeTrade(trade.id!, currentPrice, 'sl', pnl);
+      await db.update(wolfeWaves)
+        .set({ hitStopLoss: true })
+        .where(eq(wolfeWaves.id, trade.wolfeWaveId));
+      return;
+    }
+
+    // ── Target 1: close 50%, move SL to breakeven ───────────────────────────
+    const tp1Hit = closedQty1 === 0 && (isLong ? currentPrice >= tp1 : currentPrice <= tp1);
+    if (tp1Hit) {
+      const partialQty = qty * 0.5;
+
+      if (this.mode === 'real') {
+        try {
+          await this.exchange.placeOrder({
+            symbol:   trade.symbol,
+            side:     isLong ? 'sell' : 'buy',
+            type:     'market',
+            quantity: partialQty,
+            price:    currentPrice,
+          });
+        } catch (err) {
+          logger.error('TP1 partial close failed', err);
+        }
+      }
+
+      await db.update(trades).set({
+        closedQty1: partialQty.toFixed(8),
+        stopLoss:   entry.toFixed(8), // move SL to breakeven
+      }).where(eq(trades.id, trade.id!));
+
+      await db.update(wolfeWaves)
+        .set({ reachedTarget1: true })
+        .where(eq(wolfeWaves.id, trade.wolfeWaveId));
+
+      logger.info('TP1 hit — partial close 50%, SL moved to BE', {
+        id: trade.id, symbol: trade.symbol, price: currentPrice,
+      });
+      return;
+    }
+
+    // ── Target 2 ────────────────────────────────────────────────────────────
+    const tp2Hit = closedQty1 > 0 && closedQty2 === 0 &&
+      (isLong ? currentPrice >= tp2 : currentPrice <= tp2);
+
+    if (tp2Hit) {
+      if (tp3 !== undefined) {
+        // Fat M/W: close 50% of remaining, let the rest run to TP3
+        const partialQty = (qty - closedQty1) * 0.5;
+        if (this.mode === 'real') {
+          try {
+            await this.exchange.placeOrder({
+              symbol:   trade.symbol,
+              side:     isLong ? 'sell' : 'buy',
+              type:     'market',
+              quantity: partialQty,
+              price:    currentPrice,
+            });
+          } catch (err) {
+            logger.error('TP2 partial close failed', err);
+          }
+        }
+        await db.update(trades)
+          .set({ closedQty2: partialQty.toFixed(8) })
+          .where(eq(trades.id, trade.id!));
+        await db.update(wolfeWaves)
+          .set({ reachedTarget2: true })
+          .where(eq(wolfeWaves.id, trade.wolfeWaveId));
+        logger.info('TP2 hit (fat M/W) — partial close', { id: trade.id, price: currentPrice });
+      } else {
+        // Standard wave: close everything at TP2
+        const remaining = qty - closedQty1;
+        const pnl = this.calcPnl(entry, currentPrice, remaining, isLong);
+        await this.closeTrade(trade.id!, currentPrice, 'tp2', pnl);
+        await db.update(wolfeWaves)
+          .set({ reachedTarget2: true })
+          .where(eq(wolfeWaves.id, trade.wolfeWaveId));
+      }
+      return;
+    }
+
+    // ── Target 3 (fat M/W only) ─────────────────────────────────────────────
+    if (tp3 !== undefined) {
+      const tp3Hit = closedQty2 > 0 && closedQty3 === 0 &&
+        (isLong ? currentPrice >= tp3 : currentPrice <= tp3);
+
+      if (tp3Hit) {
+        if (tp4 !== undefined) {
+          const partialQty = (qty - closedQty1 - closedQty2) * 0.5;
+          if (this.mode === 'real') {
+            try {
+              await this.exchange.placeOrder({
+                symbol:   trade.symbol,
+                side:     isLong ? 'sell' : 'buy',
+                type:     'market',
+                quantity: partialQty,
+                price:    currentPrice,
+              });
+            } catch (err) {
+              logger.error('TP3 partial close failed', err);
+            }
+          }
+          await db.update(trades)
+            .set({ closedQty3: partialQty.toFixed(8) })
+            .where(eq(trades.id, trade.id!));
+          await db.update(wolfeWaves)
+            .set({ reachedTarget3: true })
+            .where(eq(wolfeWaves.id, trade.wolfeWaveId));
+          logger.info('TP3 hit — partial close', { id: trade.id, price: currentPrice });
+        } else {
+          const remaining = qty - closedQty1 - closedQty2;
+          const pnl = this.calcPnl(entry, currentPrice, remaining, isLong);
+          await this.closeTrade(trade.id!, currentPrice, 'tp3', pnl);
+          await db.update(wolfeWaves)
+            .set({ reachedTarget3: true })
+            .where(eq(wolfeWaves.id, trade.wolfeWaveId));
+        }
+        return;
+      }
+    }
+
+    // ── Target 4 (161.8% extension) ─────────────────────────────────────────
+    if (tp4 !== undefined) {
+      const tp4Hit = closedQty3 > 0 && closedQty4 === 0 &&
+        (isLong ? currentPrice >= tp4 : currentPrice <= tp4);
+
+      if (tp4Hit) {
+        const remaining = qty - closedQty1 - closedQty2 - closedQty3;
+        const pnl = this.calcPnl(entry, currentPrice, remaining, isLong);
+        await this.closeTrade(trade.id!, currentPrice, 'tp4', pnl);
+        logger.info('TP4 (161.8%) hit!', { id: trade.id, price: currentPrice });
+      }
+    }
+  }
+
+  // ─── PnL helpers ────────────────────────────────────────────────────────────
+
+  private calcPnl(
+    entryPrice: number,
+    exitPrice:  number,
+    quantity:   number,
+    isLong:     boolean,
+  ): number {
+    return isLong
+      ? (exitPrice - entryPrice) * quantity
+      : (entryPrice - exitPrice) * quantity;
+  }
+
+  // ─── Close a trade ──────────────────────────────────────────────────────────
+
+  private async closeTrade(
+    tradeId:   number,
+    exitPrice: number,
+    reason:    'tp1' | 'tp2' | 'tp3' | 'tp4' | 'sl' | 'manual' | 'timeout',
+    pnl:       number,
+  ): Promise<void> {
+    const db = await getDb();
+
+    const [trade] = await db.select().from(trades).where(eq(trades.id, tradeId));
+    if (!trade) return;
+
+    const usdAmount = Number(trade.usdAmount);
+    const pnlPct    = usdAmount > 0 ? (pnl / usdAmount) * 100 : 0;
+
+    await db.update(trades).set({
+      status:     'closed',
+      exitPrice:  exitPrice.toFixed(8),
+      exitTime:   Date.now(),
+      closeReason: reason,
+      pnl:        pnl.toFixed(2),
+      pnlPct:     pnlPct.toFixed(4),
+    }).where(eq(trades.id, tradeId));
+
+    logger.info('Trade closed', {
+      id: tradeId, reason, exitPrice,
+      pnl: pnl.toFixed(2), pnlPct: pnlPct.toFixed(2),
+    });
+  }
+}
