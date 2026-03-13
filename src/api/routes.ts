@@ -231,6 +231,9 @@ export function createRouter(exchange: IExchange, scanner: Scanner) {
       res.json({
         data: {
           mode,
+          bot: {
+            active: !scanner.isPaused()
+          },
           initialCapital,
           currentBalance: balance,
           roi,
