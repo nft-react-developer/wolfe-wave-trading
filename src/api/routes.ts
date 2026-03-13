@@ -373,7 +373,7 @@ export function createRouter(exchange: IExchange, scanner: Scanner) {
         rejected[key] = 'must be a non-negative number';
         continue;
       }
-      (config as Record<string, unknown>)[key] = num;
+      (config as unknown as Record<string, number>)[key] = num;
       updated[key] = num;
     }
 
