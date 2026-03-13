@@ -17,6 +17,11 @@ export class RiskGuard {
 
   isPaused(): boolean { return this.paused; }
 
+  pause(): void {
+    this.paused = true;
+    logger.info('RiskGuard: bot manually paused');
+  }
+
   resume(): void {
     this.paused = false;
     logger.info('RiskGuard: bot resumed');

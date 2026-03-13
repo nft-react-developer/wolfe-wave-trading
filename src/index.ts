@@ -64,7 +64,7 @@ async function main() {
 
   // ─── REST API ─────────────────────────────────────────────────────────
 
-  const app = createApp(exchange);
+  const app = createApp(exchange, scanner);
   const port = config.apiPort;
 
   app.listen(port, () => {
@@ -83,6 +83,10 @@ async function main() {
     logger.info(`  GET /api/stats/performance`);
     logger.info(`  GET /api/stats/pnl-by-period`);
     logger.info(`  GET /api/account/balance`);
+    logger.info(`  GET /api/bot/status`);
+    logger.info(`  POST /api/bot/pause`);
+    logger.info(`  POST /api/bot/resume`);
+    logger.info(`  PATCH /api/config`);
   });
 }
 

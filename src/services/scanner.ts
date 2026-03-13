@@ -50,6 +50,10 @@ export class Scanner {
     logger.info('Scanner stopped');
   }
 
+  pause(): void  { this.riskGuard.pause();  }
+  resume(): void { this.riskGuard.resume(); }
+  isPaused(): boolean { return this.riskGuard.isPaused(); }
+
   private async scan() {
     logger.debug('Scan cycle started');
 
@@ -87,7 +91,7 @@ export class Scanner {
             // Save wave to DB
             const waveId = await saveWave(wave);
 
-            // Notify Telegram
+            // Telegram wave notification disabled — only daily report is sent
             // await telegram.notifyWaveDetected({
             //   symbol: wave.symbol,
             //   timeframe: wave.timeframe,
@@ -113,20 +117,21 @@ export class Scanner {
             const availableCapital = await this.getAvailableCapital();
             const trade = await this.tradeService.openTrade(wave, waveId, availableCapital);
 
-            if (trade) {
-              await telegram.notifyTradeOpened({
-                id: trade.id,
-                symbol: trade.symbol,
-                side: trade.side,
-                entryPrice: trade.entryPrice,
-                stopLoss: trade.stopLoss,
-                target1: trade.target1,
-                target2: trade.target2,
-                usdAmount: trade.usdAmount,
-                quantity: trade.quantity,
-                mode: trade.mode,
-              });
-            }
+            // Telegram trade notification disabled — only daily report is sent
+            // if (trade) {
+            //   await telegram.notifyTradeOpened({
+            //     id: trade.id,
+            //     symbol: trade.symbol,
+            //     side: trade.side,
+            //     entryPrice: trade.entryPrice,
+            //     stopLoss: trade.stopLoss,
+            //     target1: trade.target1,
+            //     target2: trade.target2,
+            //     usdAmount: trade.usdAmount,
+            //     quantity: trade.quantity,
+            //     mode: trade.mode,
+            //   });
+            // }
           }
         } catch (err) {
           logger.error(`Error scanning ${symbol}/${timeframe}`, err);

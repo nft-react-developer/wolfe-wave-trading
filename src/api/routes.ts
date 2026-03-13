@@ -4,11 +4,12 @@ import { getDb, schema } from '../db/connection';
 import { eq, and, desc, gte, lte } from 'drizzle-orm';
 import { config } from '../utils/config';
 import { logger } from '../utils/logger';
-import type { IExchange, TradeMode } from '../types';
+import type { TradeMode, IExchange } from '../types';
+import type { Scanner } from '../services/scanner';
 
 const { wolfeWaves, trades, accountSnapshots } = schema;
 
-export function createRouter(exchange: IExchange) {
+export function createRouter(exchange: IExchange, scanner: Scanner) {
   const router = express.Router();
 
   // ─── Health ───────────────────────────────────────────────────────────────
@@ -291,7 +292,7 @@ export function createRouter(exchange: IExchange) {
   });
 
   // ─── Account balance ──────────────────────────────────────────────────────
- 
+
   /**
    * GET /api/account/balance
    * Returns available balances from the exchange (real or paper).
@@ -306,14 +307,93 @@ export function createRouter(exchange: IExchange) {
     }
   });
 
+  // ─── Bot control ─────────────────────────────────────────────────────────
+
+  /**
+   * POST /api/bot/pause
+   * Manually pause new trade detection (open trades keep being monitored).
+   */
+  router.post('/bot/pause', (_req, res) => {
+    scanner.pause();
+    res.json({ paused: true });
+  });
+
+  /**
+   * POST /api/bot/resume
+   * Resume new trade detection after a manual or automatic pause.
+   */
+  router.post('/bot/resume', (_req, res) => {
+    scanner.resume();
+    res.json({ paused: false });
+  });
+
+  /**
+   * GET /api/bot/status
+   */
+  router.get('/bot/status', (_req, res) => {
+    res.json({
+      paused: scanner.isPaused(),
+      mode:   config.tradingMode,
+      config: {
+        maxTradeAmount:        config.maxTradeAmount,
+        maxTradePct:           config.maxTradePct,
+        maxOpenTradesTotal:    config.maxOpenTradesTotal,
+        maxOpenTradesPerSymbol: config.maxOpenTradesPerSymbol,
+        maxDailyLossPct:       config.maxDailyLossPct,
+      },
+    });
+  });
+
+  // ─── Config ───────────────────────────────────────────────────────────────
+
+  /**
+   * PATCH /api/config
+   * Hot-update runtime config values without restarting the process.
+   * Accepted fields: maxTradeAmount, maxTradePct, maxOpenTradesTotal,
+   *                  maxOpenTradesPerSymbol, maxDailyLossPct
+   * Changes are lost on restart (not persisted to .env).
+   */
+  router.patch('/config', (req, res) => {
+    const allowed = [
+      'maxTradeAmount',
+      'maxTradePct',
+      'maxOpenTradesTotal',
+      'maxOpenTradesPerSymbol',
+      'maxDailyLossPct',
+    ] as const;
+
+    const updated: Record<string, number> = {};
+    const rejected: Record<string, string> = {};
+
+    for (const key of allowed) {
+      const val = req.body[key];
+      if (val === undefined) continue;
+      const num = Number(val);
+      if (isNaN(num) || num < 0) {
+        rejected[key] = 'must be a non-negative number';
+        continue;
+      }
+      (config as Record<string, unknown>)[key] = num;
+      updated[key] = num;
+    }
+
+    const unknownKeys = Object.keys(req.body).filter(
+      (k) => !(allowed as readonly string[]).includes(k)
+    );
+    for (const k of unknownKeys) rejected[k] = 'field not allowed';
+
+    logger.info('Config updated via API', updated);
+    res.json({ updated, rejected });
+  });
+
   return router;
 }
 
-export function createApp(exchange: IExchange) {
+export function createApp(exchange: IExchange, scanner: Scanner) {
   const app = express();
   app.use(express.json());
 
-  const router = createRouter(exchange);
+  const router = createRouter(exchange, scanner);
   app.use('/api', router);
 
   // 404 handler
