@@ -12,6 +12,7 @@ const { trades, wolfeWaves } = schema;
 
 export class RiskGuard {
   private paused = false;
+  private pausedOnDate = ''; // UTC date string when pause was triggered e.g. '2026-03-13'
 
   constructor(private mode: TradeMode) {}
 
@@ -102,8 +103,18 @@ export class RiskGuard {
     // dailyPnl is negative when losing
     const lossThreshold = -Math.abs(config.initialCapital * config.maxDailyLossPct);
 
+    const todayUtc = startOfDay.toISOString().slice(0, 10);
+
+    // Auto-resume if a new UTC day has started since the pause was triggered
+    if (this.paused && this.pausedOnDate && this.pausedOnDate !== todayUtc) {
+      this.paused = false;
+      this.pausedOnDate = '';
+      logger.info('RiskGuard: new UTC day — bot automatically resumed');
+    }
+
     if (dailyPnl <= lossThreshold && !this.paused) {
       this.paused = true;
+      this.pausedOnDate = todayUtc;
       logger.warn('RiskGuard: daily loss limit hit — bot paused', {
         dailyPnl: dailyPnl.toFixed(2),
         threshold: lossThreshold.toFixed(2),
