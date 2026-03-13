@@ -319,11 +319,23 @@ export class PaperExchange implements IExchange {
       const base     = params.symbol.replace(/USDT$/, '');
 
       if (params.side === 'buy') {
-        this._balance['USDT']  = (this._balance['USDT']  ?? 0) - usdValue;
-        this._balance[base]    = (this._balance[base]    ?? 0) + params.quantity;
+        const available = this._balance['USDT'] ?? 0;
+        if (usdValue > available) {
+          throw new Error(
+            `Paper balance insufficient: need $${usdValue.toFixed(2)}, have $${available.toFixed(2)} USDT`
+          );
+        }
+        this._balance['USDT']  = available - usdValue;
+        this._balance[base]    = (this._balance[base] ?? 0) + params.quantity;
       } else {
-        this._balance['USDT']  = (this._balance['USDT']  ?? 0) + usdValue;
-        this._balance[base]    = Math.max(0, (this._balance[base] ?? 0) - params.quantity);
+        const availableBase = this._balance[base] ?? 0;
+        if (params.quantity > availableBase) {
+          throw new Error(
+            `Paper balance insufficient: need ${params.quantity} ${base}, have ${availableBase}`
+          );
+        }
+        this._balance['USDT']  = (this._balance['USDT'] ?? 0) + usdValue;
+        this._balance[base]    = availableBase - params.quantity;
       }
     }
 

@@ -165,6 +165,15 @@ export class TradeService {
       return null;
     }
 
+    if (usdAmount > availableCapital) {
+      logger.warn('Skipping trade: insufficient balance', {
+        symbol: wave.symbol,
+        required: usdAmount.toFixed(2),
+        available: availableCapital.toFixed(2),
+      });
+      return null;
+    }
+
     // side / orderSide — typed as literals so Drizzle is happy
     const side:      'long' | 'short' = wave.direction === 'bullish' ? 'long' : 'short';
     const orderSide: 'buy'  | 'sell'  = side === 'long' ? 'buy' : 'sell';

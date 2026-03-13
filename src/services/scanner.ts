@@ -150,12 +150,8 @@ export class Scanner {
   }
 
   private async getAvailableCapital(): Promise<number> {
-    try {
-      const balance = await this.exchange.getBalance();
-      return balance['USDT'] ?? config.initialCapital;
-    } catch {
-      return config.initialCapital;
-    }
+    const balance = await this.exchange.getBalance();
+    return balance['USDT'] ?? 0;
   }
 
   private timeframeToMs(tf: string): number {
