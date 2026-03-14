@@ -57,6 +57,7 @@ export interface WolfeWave {
 
   // EMA50 reference at detection time
   ema50: number;
+  macdHistogram?: number;
 
   detectedAt: number;        // unix ms
 }
@@ -198,8 +199,8 @@ export interface AppConfig {
   emaPeriod: number;
   apiPort: number;
   dailyReportCron: string;
-  // Risk management parameters
-  maxOpenTradesTotal: number;     // Max total open trades (0 = no limit)
-  maxOpenTradesPerSymbol: number; // Max open trades per symbol (0 = no limit)
-  maxDailyLossPct: number;        // Max daily loss as % of initial capital (0 = no limit)
+  // ── Risk management ──────────────────────────────────────────────────────
+  maxOpenTradesTotal: number;     // 0 = unlimited
+  maxOpenTradesPerSymbol: number; // 0 = unlimited
+  maxDailyLossPct: number;        // e.g. 0.05 = pause bot when daily loss >= 5% of capital
 }

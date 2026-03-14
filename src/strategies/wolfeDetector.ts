@@ -28,29 +28,33 @@ interface ValidationResult {
 // ─── Channel / shape helpers ──────────────────────────────────────────────────
 
 /**
- * "Perfect" Wolfe: line 3-4 lies inside the channel defined by line 1-2.
- * We project line 1-2 forward and check whether P3 and P4 fall between the
- * two parallel rails through P1 and P2.
+ * "Perfect" Wolfe: the channel is defined by line 1-3 and line 2-4.
+ * P4 must fall inside the band formed by projecting those two lines
+ * to P4's index. This matches the standard Wolfe Wave channel definition
+ * rather than two parallel rails through P1 and P2.
  */
 function isInsideChannel(
   p1: WavePoint, p2: WavePoint,
   p3: WavePoint, p4: WavePoint,
 ): boolean {
-  const dx = (p2.index - p1.index) || 1;
-  const channelSlope = (p2.price - p1.price) / dx;
-
-  const railAtIdx = (base: WavePoint, idx: number) =>
-    base.price + channelSlope * (idx - base.index);
-
-  const u3 = railAtIdx(p2, p3.index);
-  const l3 = railAtIdx(p1, p3.index);
-  const u4 = railAtIdx(p2, p4.index);
-  const l4 = railAtIdx(p1, p4.index);
+  // Project line 1-3 to P4's index
+  const line13AtP4 = projectLine(p1.index, p1.price, p3.index, p3.price, p4.index);
+  // Project line 2-4 — we already have P4 on this line, so its value is p4.price.
+  // Instead check that P3 is inside the band by projecting line 2-4 back to P3.
+  const line24AtP3 = projectLine(p2.index, p2.price, p4.index, p4.price, p3.index);
 
   const inBand = (v: number, a: number, b: number) =>
     v >= Math.min(a, b) && v <= Math.max(a, b);
 
-  return inBand(p3.price, l3, u3) && inBand(p4.price, l4, u4);
+  // P3 must sit between line 1-3 extended and line 2-4 extended at P3's index
+  const line13AtP3 = projectLine(p1.index, p1.price, p3.index, p3.price, p3.index); // = p3.price
+  const p3InBand   = inBand(p3.price, line13AtP3, line24AtP3);
+
+  // P4 must sit between line 1-3 and line 2-4 at P4's index
+  const line24AtP4 = p4.price; // P4 is on line 2-4 by definition
+  const p4InBand   = inBand(p4.price, line13AtP4, line24AtP4);
+
+  return p3InBand && p4InBand;
 }
 
 /**
@@ -195,9 +199,13 @@ function buildWave(
   // do NOT wait for the line 1-3 crossover (75% of waves never cross it).
   const entryPrice = p5.price;
 
-  // SL buffer = 10% of the P3→P5 leg (the final thrust into P5)
-  const lastLegSize = Math.abs(p5.price - p3.price);
-  const slBuffer    = lastLegSize * 0.10;
+  // SL buffer: 10% of the P3→P5 leg, capped at 2% of the entry price.
+  // The cap prevents absurdly wide stops on high-volatility legs while
+  // still giving P5 a small margin so micro-wicks don't trigger the SL.
+  const lastLegSize  = Math.abs(p5.price - p3.price);
+  const rawBuffer    = lastLegSize * 0.10;
+  const maxBuffer    = p5.price * 0.02;          // never more than 2% of price
+  const slBuffer     = Math.min(rawBuffer, maxBuffer);
 
   const stopLoss = direction === 'bullish'
     ? p5.price - slBuffer   // long: SL just below P5
@@ -226,7 +234,8 @@ function buildWave(
     signal:    macdResult.signal.slice(start, p5.index + 1),
     histogram: macdResult.histogram.slice(start, p5.index + 1),
   };
-  const hasDivergence = hasMACDDivergence(lookbackCandles, direction, lookbackMacd, 5);
+  const hasDivergence  = hasMACDDivergence(lookbackCandles, direction, lookbackMacd, 5);
+  const macdHistogram  = macdResult.histogram[p5.index] ?? NaN;
 
   logger.debug('Wave built', {
     symbol, timeframe, direction, shape, isPerfect, isFatMW,
@@ -250,8 +259,30 @@ function buildWave(
     target4: isFatMW ? target4 : undefined,
     line14Price,
     ema50,
+    macdHistogram: isNaN(macdHistogram) ? undefined : macdHistogram,
     detectedAt: Date.now(),
   };
+}
+
+// ─── Timeframe helpers ───────────────────────────────────────────────────────
+
+/**
+ * Returns pivot detection strength (candles on each side) based on timeframe.
+ * Higher timeframes require a wider lookback to filter out noise.
+ */
+function pivotStrengthForTimeframe(timeframe: string): number {
+  const map: Record<string, number> = {
+    '1min':  2,
+    '3min':  2,
+    '5min':  3,
+    '15min': 3,
+    '30min': 4,
+    '1hour': 4,
+    '2hour': 5,
+    '4hour': 6,
+    '1day':  7,
+  };
+  return map[timeframe] ?? 3;
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -267,13 +298,25 @@ export function detectWolfeWaves(
   const closes     = candles.map((c) => c.close);
   const emaValues  = calcEMA(closes, config.emaPeriod);
   const macdResult = calcMACD(candles, config.macd.fast, config.macd.slow, config.macd.signal);
-  const pivots     = findPivots(candles, 3);
+
+  // Pivot strength scales with timeframe — higher timeframes need a wider
+  // lookback to avoid detecting noise as significant pivot points.
+  const pivotStrength = pivotStrengthForTimeframe(timeframe);
+  const pivots        = findPivots(candles, pivotStrength);
 
   if (pivots.length < 5) return [];
 
   const waves: WolfeWave[] = [];
 
+  // Only evaluate wave candidates where P5 is the most recent pivot.
+  // This prevents the bot from acting on historical waves that have already
+  // resolved (P5 is not the last pivot in the array means the pattern is old).
+  const lastPivotIndex = pivots.length - 1;
+
   for (let i = 0; i <= pivots.length - 5; i++) {
+    // Skip if this group's P5 is not the last pivot
+    if (i + 4 !== lastPivotIndex) continue;
+
     const [pA, pB, pC, pD, pE] = pivots.slice(i, i + 5) as [Pivot, Pivot, Pivot, Pivot, Pivot];
 
     // ── Bullish (M shape): low-high-low-high-low ──────────────────────────
