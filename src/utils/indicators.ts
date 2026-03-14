@@ -170,7 +170,10 @@ export interface Pivot {
 
 /**
  * Find alternating pivot highs and lows in a candle series.
- * Uses a simple n-candle lookback on each side.
+ * Uses closing prices as per Alba Puerro's methodology — close values
+ * represent the market consensus and filter out wick noise.
+ * A pivot high is a close higher than the closes of the surrounding candles.
+ * A pivot low is a close lower than the closes of the surrounding candles.
  */
 export function findPivots(candles: Candle[], strength = 3): Pivot[] {
   const pivots: Pivot[] = [];
@@ -178,33 +181,33 @@ export function findPivots(candles: Candle[], strength = 3): Pivot[] {
   for (let i = strength; i < candles.length - strength; i++) {
     const current = candles[i];
 
-    // Check pivot high
     let isHigh = true;
-    let isLow = true;
+    let isLow  = true;
 
     for (let j = i - strength; j <= i + strength; j++) {
       if (j === i) continue;
-      if (candles[j].high >= current.high) isHigh = false;
-      if (candles[j].low <= current.low) isLow = false;
+      if (candles[j].close >= current.close) isHigh = false;
+      if (candles[j].close <= current.close) isLow  = false;
     }
 
     if (isHigh) {
-      pivots.push({ index: i, price: current.high, timestamp: current.timestamp, type: 'high' });
+      // Price stored as close (not high wick)
+      pivots.push({ index: i, price: current.close, timestamp: current.timestamp, type: 'high' });
     } else if (isLow) {
-      pivots.push({ index: i, price: current.low, timestamp: current.timestamp, type: 'low' });
+      // Price stored as close (not low wick)
+      pivots.push({ index: i, price: current.close, timestamp: current.timestamp, type: 'low' });
     }
   }
 
-  // Remove consecutive same-type pivots (keep most extreme)
+  // Remove consecutive same-type pivots (keep most extreme close)
   const filtered: Pivot[] = [];
   for (const p of pivots) {
     const last = filtered[filtered.length - 1];
     if (!last || last.type !== p.type) {
       filtered.push(p);
     } else {
-      // Replace if more extreme
       if (p.type === 'high' && p.price > last.price) filtered[filtered.length - 1] = p;
-      if (p.type === 'low' && p.price < last.price) filtered[filtered.length - 1] = p;
+      if (p.type === 'low'  && p.price < last.price) filtered[filtered.length - 1] = p;
     }
   }
 
