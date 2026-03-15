@@ -4,6 +4,7 @@ import { config } from './utils/config';
 import { logger } from './utils/logger';
 import { CoinExExchange, PaperExchange } from './services/exchange';
 import { Scanner } from './services/scanner';
+import { PollingPriceFeed, WebSocketPriceFeed } from './services/priceFeed';
 import { createApp } from './api/routes';
 import { startDailyReportScheduler } from './services/scheduler';
 import type { IExchange } from './types';
@@ -55,7 +56,11 @@ async function main() {
 
   // ─── Scanner ──────────────────────────────────────────────────────────
 
-  scanner = new Scanner(exchange);
+  const priceFeed = config.priceFeed === 'websocket'
+    ? new WebSocketPriceFeed()
+    : new PollingPriceFeed();
+
+  scanner = new Scanner(exchange, priceFeed);
   scanner.start();
 
   // ─── Daily report scheduler ───────────────────────────────────────────
@@ -87,6 +92,7 @@ async function main() {
     logger.info(`  POST /api/bot/pause`);
     logger.info(`  POST /api/bot/resume`);
     logger.info(`  PATCH /api/config`);
+    logger.info(`Price feed: ${config.priceFeed.toUpperCase()}`);
   });
 }
 

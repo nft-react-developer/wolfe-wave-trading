@@ -1,6 +1,5 @@
 import * as dotenv from 'dotenv';
-import { AppConfig } from '../types';
-
+import type { AppConfig } from '../types';
 
 dotenv.config();
 
@@ -42,9 +41,10 @@ export function loadConfig(): AppConfig {
     apiPort: Number(process.env.API_PORT ?? 3000),
     dailyReportCron: process.env.DAILY_REPORT_CRON ?? '0 8 * * *',
     // ── Risk management ────────────────────────────────────────────────────
-    maxOpenTradesTotal:     Number(process.env.MAX_OPEN_TRADES_TOTAL     ?? 80),
-    maxOpenTradesPerSymbol: Number(process.env.MAX_OPEN_TRADES_PER_SYMBOL ?? 50),
+    maxOpenTradesTotal:     Number(process.env.MAX_OPEN_TRADES_TOTAL     ?? 0),
+    maxOpenTradesPerSymbol: Number(process.env.MAX_OPEN_TRADES_PER_SYMBOL ?? 0),
     maxDailyLossPct:        Number(process.env.MAX_DAILY_LOSS_PCT        ?? 0.05),
+    priceFeed:              (process.env.PRICE_FEED ?? 'polling') as 'polling' | 'websocket',
   };
 }
 

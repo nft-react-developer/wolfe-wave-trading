@@ -170,6 +170,19 @@ export interface ExchangeOrder {
   filledAt?: number;
 }
 
+// ─── Price Feed ──────────────────────────────────────────────────────────────
+
+/**
+ * Abstraction over how current prices are delivered to the trade monitor.
+ * - PollingPriceFeed: prices come from the candle scan cycle (default)
+ * - WebSocketPriceFeed: prices stream in real-time from CoinEx WS
+ */
+export interface IPriceFeed {
+  /** Start delivering prices. onPrice is called whenever a new price arrives. */
+  start(symbols: string[], onPrice: (symbol: string, price: number) => void): void;
+  stop(): void;
+}
+
 export interface IExchange {
   getName(): string;
   getCandles(symbol: string, timeframe: string, limit: number): Promise<Candle[]>;
@@ -203,4 +216,5 @@ export interface AppConfig {
   maxOpenTradesTotal: number;     // 0 = unlimited
   maxOpenTradesPerSymbol: number; // 0 = unlimited
   maxDailyLossPct: number;        // e.g. 0.05 = pause bot when daily loss >= 5% of capital
+  priceFeed: 'polling' | 'websocket';
 }
