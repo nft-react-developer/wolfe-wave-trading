@@ -409,8 +409,15 @@ export class TradeService {
   }
 
   // ─── Monitor open trades against latest price ───────────────────────────────
+  //
+  // candlesMap is optional — only needed when TRAILING_STOP_METHOD=structure or atr.
+  // The scanner passes it during the polling cycle (candles already fetched).
+  // In websocket mode it is omitted; trailing stop falls back to percentage mode.
 
-  async checkOpenTrades(currentPrices: Record<string, number>): Promise<void> {
+  async checkOpenTrades(
+    currentPrices: Record<string, number>,
+    candlesMap?: Record<string, import('../types').Candle[]>,
+  ): Promise<void> {
     const db = await getDb();
 
     const openTrades = await db
@@ -421,7 +428,8 @@ export class TradeService {
     for (const trade of openTrades) {
       const price = currentPrices[trade.symbol];
       if (price === undefined) continue;
-      await this.evaluateTrade(trade, price);
+      const candles = candlesMap?.[trade.symbol];
+      await this.evaluateTrade(trade, price, candles);
     }
   }
 
@@ -430,6 +438,7 @@ export class TradeService {
   private async evaluateTrade(
     trade: typeof trades.$inferSelect,
     currentPrice: number,
+    candles?: import('../types').Candle[],
   ): Promise<void> {
     const db = await getDb();
 
@@ -492,6 +501,27 @@ export class TradeService {
         id: trade.id, symbol: trade.symbol, price: currentPrice,
       });
       return;
+    }
+
+    // ── Trailing Stop (active after TP1, i.e. closedQty1 > 0) ───────────────
+    if (closedQty1 > 0 && config.trailingStopMethod !== undefined) {
+      await this.applyTrailingStop(trade, currentPrice, sl, isLong, candles);
+      // Re-read stopLoss from DB in case it was updated, to avoid stale sl below
+      const [refreshed] = await db.select({ stopLoss: trades.stopLoss })
+        .from(trades).where(eq(trades.id, trade.id!));
+      if (refreshed) {
+        const newSl = Number(refreshed.stopLoss);
+        const slHitAfterTrail = isLong ? currentPrice <= newSl : currentPrice >= newSl;
+        if (slHitAfterTrail) {
+          const remaining = qty - closedQty1 - closedQty2 - closedQty3 - closedQty4;
+          const pnl = this.calcPnl(entry, currentPrice, remaining, isLong);
+          await this.closeTrade(trade.id!, currentPrice, 'sl', pnl);
+          await db.update(wolfeWaves)
+            .set({ hitStopLoss: true })
+            .where(eq(wolfeWaves.id, trade.wolfeWaveId));
+          return;
+        }
+      }
     }
 
     // ── Target 2 ────────────────────────────────────────────────────────────
@@ -586,6 +616,131 @@ export class TradeService {
         logger.info('TP4 (161.8%) hit!', { id: trade.id, price: currentPrice });
       }
     }
+  }
+
+  // ─── Trailing Stop ────────────────────────────────────────────────────────
+  //
+  // Called once per price tick (WS mode) or per scan cycle (polling mode)
+  // after TP1 has been hit. Calculates the new trailing SL and updates the
+  // DB + exchange order if the improvement exceeds the minimum move threshold.
+
+  private async applyTrailingStop(
+    trade:        typeof trades.$inferSelect,
+    currentPrice: number,
+    currentSl:    number,
+    isLong:       boolean,
+    candles?:     import('../types').Candle[],
+  ): Promise<void> {
+    const newSl = this.calcTrailingStop(currentPrice, currentSl, isLong, candles);
+    if (newSl === null) return;
+
+    // Only move SL in the favorable direction
+    const improved = isLong ? newSl > currentSl : newSl < currentSl;
+    if (!improved) return;
+
+    // Check minimum move threshold before touching the exchange
+    const minMove = config.trailingStopMinMove;
+    const movePct = Math.abs(newSl - currentSl) / currentSl;
+    if (movePct < minMove) return;
+
+    const db = await getDb();
+
+    // Update DB
+    await db.update(trades)
+      .set({ stopLoss: newSl.toFixed(8) })
+      .where(eq(trades.id, trade.id!));
+
+    logger.debug('Trailing stop updated', {
+      id:       trade.id,
+      symbol:   trade.symbol,
+      oldSl:    currentSl.toFixed(8),
+      newSl:    newSl.toFixed(8),
+      method:   config.trailingStopMethod,
+    });
+
+    // Update exchange order in real mode: cancel old SL, place new one
+    if (this.mode === 'real' && trade.slOrderId) {
+      try {
+        await this.exchange.cancelOrder(trade.symbol, trade.slOrderId);
+
+        const remaining =
+          Number(trade.quantity)
+          - Number(trade.closedQty1)
+          - Number(trade.closedQty2)
+          - Number(trade.closedQty3)
+          - Number(trade.closedQty4);
+
+        const newSlOrder = await this.exchange.placeOrder({
+          symbol:   trade.symbol,
+          side:     isLong ? 'sell' : 'buy',
+          type:     'limit',
+          quantity: remaining,
+          price:    newSl,
+        });
+
+        await db.update(trades)
+          .set({ slOrderId: newSlOrder.orderId })
+          .where(eq(trades.id, trade.id!));
+
+        logger.info('Trailing stop order replaced on exchange', {
+          id: trade.id, newSl: newSl.toFixed(8), orderId: newSlOrder.orderId,
+        });
+      } catch (err) {
+        logger.error('Failed to replace trailing SL order on exchange', err);
+      }
+    }
+  }
+
+  /**
+   * Calculate the new trailing stop level based on the configured method.
+   * Returns null if no valid level can be computed (e.g. not enough candles).
+   *
+   * - structure:  SL = lowest/highest CLOSE of the last N candles
+   * - percentage: SL = currentPrice ± (currentPrice * trailingStopPct)
+   * - atr:        SL = currentPrice ± (ATR(N) * 1.5)
+   */
+  private calcTrailingStop(
+    currentPrice: number,
+    currentSl:    number,
+    isLong:       boolean,
+    candles?:     import('../types').Candle[],
+  ): number | null {
+    const method   = config.trailingStopMethod;
+    const lookback = config.trailingStopLookback;
+
+    if (method === 'percentage') {
+      const offset = currentPrice * config.trailingStopPct;
+      return isLong ? currentPrice - offset : currentPrice + offset;
+    }
+
+    // Structure and ATR both require recent candles
+    if (!candles || candles.length < lookback) {
+      // Fall back to percentage if no candles available (e.g. WS mode)
+      const offset = currentPrice * config.trailingStopPct;
+      return isLong ? currentPrice - offset : currentPrice + offset;
+    }
+
+    const recent = candles.slice(-lookback);
+
+    if (method === 'structure') {
+      // Use close prices (Alba Puerro methodology)
+      const closes = recent.map(c => c.close);
+      return isLong
+        ? Math.min(...closes)   // lowest recent close — SL trails below price
+        : Math.max(...closes);  // highest recent close — SL trails above price
+    }
+
+    if (method === 'atr') {
+      // ATR = average of |high-low| over last N candles (simplified true range)
+      const trValues = recent.map(c => c.high - c.low);
+      const atr = trValues.reduce((sum, v) => sum + v, 0) / trValues.length;
+      const multiplier = 1.5;
+      return isLong
+        ? currentPrice - atr * multiplier
+        : currentPrice + atr * multiplier;
+    }
+
+    return null;
   }
 
   // ─── PnL helpers ────────────────────────────────────────────────────────────

@@ -45,6 +45,12 @@ export function loadConfig(): AppConfig {
     maxOpenTradesPerSymbol: Number(process.env.MAX_OPEN_TRADES_PER_SYMBOL ?? 0),
     maxDailyLossPct:        Number(process.env.MAX_DAILY_LOSS_PCT        ?? 0.05),
     priceFeed:              (process.env.PRICE_FEED ?? 'polling') as 'polling' | 'websocket',
+
+    // ── Trailing stop ──────────────────────────────────────────────────────
+    trailingStopMethod:   (process.env.TRAILING_STOP_METHOD   ?? 'structure') as 'structure' | 'percentage' | 'atr',
+    trailingStopLookback: Number(process.env.TRAILING_STOP_LOOKBACK  ?? 5),
+    trailingStopPct:      Number(process.env.TRAILING_STOP_PCT       ?? 0.015),
+    trailingStopMinMove:  Number(process.env.TRAILING_STOP_MIN_MOVE  ?? 0.003),
   };
 }
 

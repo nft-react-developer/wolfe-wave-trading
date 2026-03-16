@@ -2,10 +2,9 @@ import type { IExchange, IPriceFeed } from '../types';
 import { detectWolfeWaves } from '../strategies/wolfeDetector';
 import { saveWave, waveAlreadyExists } from '../services/waveRepository';
 import { TradeService, RiskGuard } from '../services/tradeManager';
-
+import { PollingPriceFeed } from '../services/priceFeed';
 import { config } from '../utils/config';
 import { logger } from '../utils/logger';
-import { PollingPriceFeed } from './priceFeed';
 
 export class Scanner {
   private running = false;
@@ -16,6 +15,9 @@ export class Scanner {
 
   // Latest known price per symbol — updated by both polling and WS feeds
   private currentPrices: Record<string, number> = {};
+
+  // Latest candle history per symbol — used for structure/ATR trailing stop
+  private latestCandles: Record<string, import('../types').Candle[]> = {};
 
   constructor(private exchange: IExchange, priceFeed: IPriceFeed) {
     this.tradeService = new TradeService(exchange, config.tradingMode);
@@ -95,9 +97,10 @@ export class Scanner {
           const candles = await this.exchange.getCandles(symbol, timeframe, 200);
           if (candles.length === 0) continue;
 
-          // Update latest price from candles
+          // Update latest price and candle history
           const latestClose = candles[candles.length - 1].close;
           this.currentPrices[symbol] = latestClose;
+          this.latestCandles[symbol]  = candles;
 
           // In polling mode: push price through the feed callback
           if (config.priceFeed === 'polling' && this.priceFeed instanceof PollingPriceFeed) {
@@ -136,7 +139,7 @@ export class Scanner {
     // so we skip it here to avoid double-evaluation.
     if (config.priceFeed === 'polling') {
       try {
-        await this.tradeService.checkOpenTrades(this.currentPrices);
+        await this.tradeService.checkOpenTrades(this.currentPrices, this.latestCandles);
       } catch (err) {
         logger.error('Error checking open trades', err);
       }

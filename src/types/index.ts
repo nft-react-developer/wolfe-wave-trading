@@ -217,4 +217,9 @@ export interface AppConfig {
   maxOpenTradesPerSymbol: number; // 0 = unlimited
   maxDailyLossPct: number;        // e.g. 0.05 = pause bot when daily loss >= 5% of capital
   priceFeed: 'polling' | 'websocket';
+  // ── Trailing stop ────────────────────────────────────────────────────────
+  trailingStopMethod:   'structure' | 'percentage' | 'atr'; // default: structure
+  trailingStopLookback: number;   // candles for structure/ATR (default: 5)
+  trailingStopPct:      number;   // only used when method=percentage (default: 0.015 = 1.5%)
+  trailingStopMinMove:  number;   // min price change to update SL on exchange (default: 0.003 = 0.3%)
 }
