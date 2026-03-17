@@ -71,6 +71,12 @@ export class Scanner {
     logger.info('Scanner stopped');
   }
 
+  /** Hot-update the list of symbols to scan — called by the symbol update cron */
+  updateSymbols(symbols: string[]): void {
+    config.scanSymbols = symbols;
+    logger.info('Scanner: symbols updated', { symbols });
+  }
+
   pause():    void    { this.riskGuard.pause();    }
   resume():   void    { this.riskGuard.resume();   }
   isPaused(): boolean { return this.riskGuard.isPaused(); }

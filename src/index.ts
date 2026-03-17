@@ -6,7 +6,8 @@ import { CoinExExchange, PaperExchange } from './services/exchange';
 import { Scanner } from './services/scanner';
 import { PollingPriceFeed, WebSocketPriceFeed } from './services/priceFeed';
 import { createApp } from './api/routes';
-import { startDailyReportScheduler } from './services/scheduler';
+import { startDailyReportScheduler, startSymbolUpdateScheduler } from './services/scheduler';
+import { snapshotDailyVolumes, getTopSymbols } from './services/symbolSelector';
 import type { IExchange } from './types';
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
@@ -66,6 +67,19 @@ async function main() {
   // ─── Daily report scheduler ───────────────────────────────────────────
 
   startDailyReportScheduler();
+
+  // ─── Symbol selector ──────────────────────────────────────────────────────
+  // On startup: take a volume snapshot and load top symbols immediately.
+  // Then schedule daily updates at SYMBOL_UPDATE_CRON (default 00:05 UTC).
+  try {
+    await snapshotDailyVolumes();
+    const topSymbols = await getTopSymbols();
+    scanner.updateSymbols(topSymbols);
+  } catch (err) {
+    logger.warn('Symbol selector startup failed, using config.scanSymbols as fallback', err);
+  }
+
+  startSymbolUpdateScheduler((symbols) => scanner?.updateSymbols(symbols));
 
   // ─── REST API ─────────────────────────────────────────────────────────
 

@@ -222,4 +222,5 @@ export interface AppConfig {
   trailingStopLookback: number;   // candles for structure/ATR (default: 5)
   trailingStopPct:      number;   // only used when method=percentage (default: 0.015 = 1.5%)
   trailingStopMinMove:  number;   // min price change to update SL on exchange (default: 0.003 = 0.3%)
+  symbolUpdateCron: string;       // when to update the list of scanned symbols daily (default: '5 0 * * *' = 00:05 UTC)
 }

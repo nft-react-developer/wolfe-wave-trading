@@ -232,7 +232,7 @@ export function createRouter(exchange: IExchange, scanner: Scanner) {
         data: {
           mode,
           bot: {
-            active: !scanner.isPaused()
+            active: !scanner.isPaused(),
           },
           initialCapital,
           currentBalance: balance,
@@ -335,14 +335,15 @@ export function createRouter(exchange: IExchange, scanner: Scanner) {
    */
   router.get('/bot/status', (_req, res) => {
     res.json({
-      paused: scanner.isPaused(),
-      mode:   config.tradingMode,
+      paused:  scanner.isPaused(),
+      mode:    config.tradingMode,
+      symbols: config.scanSymbols,
       config: {
-        maxTradeAmount:        config.maxTradeAmount,
-        maxTradePct:           config.maxTradePct,
-        maxOpenTradesTotal:    config.maxOpenTradesTotal,
+        maxTradeAmount:         config.maxTradeAmount,
+        maxTradePct:            config.maxTradePct,
+        maxOpenTradesTotal:     config.maxOpenTradesTotal,
         maxOpenTradesPerSymbol: config.maxOpenTradesPerSymbol,
-        maxDailyLossPct:       config.maxDailyLossPct,
+        maxDailyLossPct:        config.maxDailyLossPct,
       },
     });
   });

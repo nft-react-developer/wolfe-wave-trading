@@ -51,6 +51,7 @@ export function loadConfig(): AppConfig {
     trailingStopLookback: Number(process.env.TRAILING_STOP_LOOKBACK  ?? 5),
     trailingStopPct:      Number(process.env.TRAILING_STOP_PCT       ?? 0.015),
     trailingStopMinMove:  Number(process.env.TRAILING_STOP_MIN_MOVE  ?? 0.003),
+    symbolUpdateCron: process.env.SYMBOL_UPDATE_CRON ?? '5 0 * * *',
   };
 }
 

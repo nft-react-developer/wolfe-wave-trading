@@ -161,6 +161,23 @@ export const accountSnapshots = mysqlTable(
   })
 );
 
+
+// ─── Symbol volumes ───────────────────────────────────────────────────────
+export const symbolVolume = mysqlTable(
+  'symbol_volume',
+  {
+    id:          int('id').autoincrement().primaryKey(),
+    symbol:      varchar('symbol', { length: 20 }).notNull(),
+    date:        varchar('date', { length: 10 }).notNull(),
+    volumeUsdt:  decimal('volume_usdt', { precision: 30, scale: 2 }).notNull(),
+    createdAt:   timestamp('created_at').defaultNow(),
+  },
+  (table) => ({
+    symbolDateIdx: index('idx_sv_date').on(table.date),
+    symbolIdx:     index('idx_sv_symbol').on(table.symbol),
+  })
+);
+
 // ─── Type helpers ─────────────────────────────────────────────────────────────
 
 export type WolfeWaveRow = typeof wolfeWaves.$inferSelect;
