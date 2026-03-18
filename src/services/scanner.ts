@@ -1,6 +1,6 @@
 import type { IExchange, IPriceFeed } from '../types';
 import { detectWolfeWaves } from '../strategies/wolfeDetector';
-import { saveWave, waveAlreadyExists } from '../services/waveRepository';
+import { saveWave, tradeAlreadyOpenForWave, waveAlreadyExists } from '../services/waveRepository';
 import { TradeService, RiskGuard } from '../services/tradeManager';
 import { PollingPriceFeed } from '../services/priceFeed';
 import { config } from '../utils/config';
@@ -124,6 +124,16 @@ export class Scanner {
             if (exists) continue;
 
             const waveId = await saveWave(wave);
+
+            const hasOpenTrade = await tradeAlreadyOpenForWave(wave, candleDurationMs * 10);
+            if (hasOpenTrade) {
+              logger.info('Trade skipped: already have an open trade for this wave', {
+                symbol: wave.symbol,
+                direction: wave.direction,
+                p5: wave.p5.price,
+              });
+              continue;
+            }
 
             const riskCheck = await this.riskGuard.canOpenTrade(wave.symbol);
             if (!riskCheck.allowed) {

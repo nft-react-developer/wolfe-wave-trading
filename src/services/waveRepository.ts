@@ -2,6 +2,8 @@ import { eq, and, gte, lte } from 'drizzle-orm';
 import type { WolfeWave } from '../types';
 import { getDb, schema } from '../db/connection';
 import { logger } from '../utils/logger';
+import { trades } from '../db/schema';
+import { config } from '../utils/config';
 
 const { wolfeWaves } = schema;
 
@@ -76,6 +78,36 @@ export async function waveAlreadyExists(wave: WolfeWave, timeWindowMs: number): 
         gte(wolfeWaves.detectedAt, minTime),
         gte(wolfeWaves.p5Price, p5Low.toFixed(8)),
         lte(wolfeWaves.p5Price, p5High.toFixed(8))
+      )
+    )
+    .limit(1);
+
+  return existing.length > 0;
+}
+
+
+export async function tradeAlreadyOpenForWave(wave: WolfeWave, timeWindowMs: number): Promise<boolean> {
+  const db = await getDb();
+
+  const p5Low  = wave.p5.price * 0.999;
+  const p5High = wave.p5.price * 1.001;
+  const minTime = wave.detectedAt - timeWindowMs;
+
+  // Busca ondas similares que tengan un trade abierto vinculado
+  const existing = await db
+    .select({ id: wolfeWaves.id })
+    .from(wolfeWaves)
+    .innerJoin(trades, eq(trades.wolfeWaveId, wolfeWaves.id))
+    .where(
+      and(
+        eq(wolfeWaves.symbol, wave.symbol),
+        eq(wolfeWaves.direction, wave.direction),
+        eq(wolfeWaves.timeframe, wave.timeframe),
+        gte(wolfeWaves.detectedAt, minTime),
+        gte(wolfeWaves.p5Price, p5Low.toFixed(8)),
+        lte(wolfeWaves.p5Price, p5High.toFixed(8)),
+        eq(trades.status, 'open'),
+        eq(trades.mode, config.tradingMode),
       )
     )
     .limit(1);
