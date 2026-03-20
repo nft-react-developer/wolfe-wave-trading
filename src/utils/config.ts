@@ -18,8 +18,8 @@ export function loadConfig(): AppConfig {
   const mode = (process.env.TRADING_MODE ?? 'paper') as 'paper' | 'real';
 
   const initialCapital = Number(process.env.INITIAL_CAPITAL ?? 10000);
-  const maxTradePct = Number(process.env.MAX_TRADE_PCT ?? 0.02);
-  const maxTradeAmountEnv = Number(process.env.MAX_TRADE_AMOUNT ?? 200);
+  const maxTradePct = Number(process.env.MAX_TRADE_PCT ?? 0.1);
+  const maxTradeAmountEnv = Number(process.env.MAX_TRADE_AMOUNT ?? 500);
 
   // The actual max per-trade is the lesser of the absolute cap and the % cap
   const maxTradeAmount = Math.min(maxTradeAmountEnv, initialCapital * maxTradePct);
