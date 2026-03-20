@@ -130,18 +130,32 @@ export class CoinExExchange implements IExchange {
   }): Promise<ExchangeOrder> {
     const requestPath = '/v2/spot/order';
 
+    // Para market buy CoinEx espera el importe en USDT, no la cantidad base
+    const isMarketBuy = params.type === 'market' && params.side === 'buy';
+    const amount = isMarketBuy
+      ? (params.quantity * (params.price ?? 0)).toFixed(2)  // USDT a gastar
+      : params.quantity.toFixed(8);                          // cantidad base
+
     const bodyObj: Record<string, unknown> = {
       market:      params.symbol,
       market_type: 'SPOT',
       side:        params.side,
       type:        params.type,
-      amount:      params.quantity.toFixed(8),
+      amount,
     };
     if (params.type === 'limit' && params.price !== undefined) {
       bodyObj.price = params.price.toFixed(8);
     }
 
     const bodyStr = JSON.stringify(bodyObj);
+
+    logger.info('CoinEx placeOrder payload', {
+      symbol:  params.symbol,
+      side:    params.side,
+      type:    params.type,
+      amount,
+      price:   params.price,
+    });
 
     try {
       const resp = await this.client.post('/spot/order', bodyStr, {
