@@ -201,6 +201,17 @@ export class TradeService {
     let slOrderId:    string | undefined;
 
     try {
+
+    logger.info('Placing entry order', {
+        symbol:    wave?.symbol,
+        side:      orderSide,
+        type:      'market',
+        quantity:  quantity?.toFixed(8),
+        usdAmount: usdAmount?.toFixed(2),
+        price:     wave?.entryPrice,
+        sl:        wave?.stopLoss,
+      });
+
       const entryOrder = await this.exchange.placeOrder({
         symbol:   wave.symbol,
         side:     orderSide,
