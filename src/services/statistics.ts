@@ -163,8 +163,8 @@ export async function generateDailyReport(mode: TradeMode): Promise<DailyReport>
   const startOfDay = new Date(dateStr + 'T00:00:00Z').getTime();
   const endOfDay = startOfDay + 86_400_000;
 
-  // Today's trades
-  const todayTrades = await db.select().from(trades).where(
+  // Trades ABIERTOS hoy (para el contador tradesOpened)
+  const openedToday = await db.select().from(trades).where(
     and(
       eq(trades.mode, mode),
       gte(trades.entryTime, startOfDay),
@@ -172,12 +172,22 @@ export async function generateDailyReport(mode: TradeMode): Promise<DailyReport>
     )
   );
 
-  const closedToday = todayTrades.filter((t) => t.status === 'closed');
+  // Trades CERRADOS hoy — filtramos por exitTime, no entryTime.
+  // Así capturamos trades abiertos ayer (o antes) pero cerrados hoy.
+  const closedToday = await db.select().from(trades).where(
+    and(
+      eq(trades.mode, mode),
+      eq(trades.status, 'closed'),
+      gte(trades.exitTime, startOfDay),
+      lte(trades.exitTime, endOfDay)
+    )
+  );
+
   const dailyPnl = closedToday.reduce((s, t) => s + Number(t.pnl ?? 0), 0);
   const wins = closedToday.filter((t) => Number(t.pnl) >= 0).length;
   const winRate = closedToday.length > 0 ? (wins / closedToday.length) * 100 : 0;
 
-  // Open positions
+  // Open positions (total actualmente abiertas)
   const openPositions = (await db.select({ c: count() }).from(trades).where(
     and(eq(trades.mode, mode), eq(trades.status, 'open'))
   ))[0]?.c ?? 0;
@@ -206,7 +216,7 @@ export async function generateDailyReport(mode: TradeMode): Promise<DailyReport>
     balance: balance.toFixed(2),
     dailyPnl: dailyPnl.toFixed(2),
     cumulativePnl: cumulativePnl.toFixed(2),
-    tradesOpened: todayTrades.length,
+    tradesOpened: openedToday.length,
     tradesClosed: closedToday.length,
     wavesDetected,
     winRate: winRate.toFixed(2),
@@ -223,7 +233,7 @@ export async function generateDailyReport(mode: TradeMode): Promise<DailyReport>
   return {
     date: dateStr,
     mode,
-    tradesOpened: todayTrades.length,
+    tradesOpened: openedToday.length,
     tradesClosed: closedToday.length,
     dailyPnl,
     cumulativePnl,
