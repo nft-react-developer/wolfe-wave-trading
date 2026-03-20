@@ -145,8 +145,8 @@ export function calcPositionSize(
   const cappedUsd = Math.min(usdAmount, config.maxTradeAmount);
   const cappedQty = cappedUsd / entryPrice;
 
-  // Mínimo de orden aceptado por CoinEx (5 USDT)
-  const MIN_ORDER_USDT = 5;
+  // Mínimo de orden aceptado por CoinEx (30 USDT)
+  const MIN_ORDER_USDT = 30;
   if (cappedUsd < MIN_ORDER_USDT) {
     if (availableCapital < MIN_ORDER_USDT) return { usdAmount: 0, quantity: 0 };
     const minQty = MIN_ORDER_USDT / entryPrice;
