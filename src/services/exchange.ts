@@ -1,10 +1,9 @@
-import axios, { type AxiosInstance } from 'axios';
+import axios, { type AxiosInstance, type AxiosError } from 'axios';
 import crypto from 'crypto';
 import type { Candle, ExchangeOrder, IExchange } from '../types';
 import { logger } from '../utils/logger';
 
 // ─── CoinEx V2 kline period values ───────────────────────────────────────────
-// https://docs.coinex.com/api/v2/spot/market/http/list-market-kline
 
 const TIMEFRAME_MAP: Record<string, string> = {
   '1min':  '1min',
@@ -22,6 +21,26 @@ const TIMEFRAME_MAP: Record<string, string> = {
   '1week': '1week',
 };
 
+// ─── Helper: extract useful info from Axios errors ───────────────────────────
+
+function formatAxiosError(err: unknown): object {
+  if (axios.isAxiosError(err)) {
+    const e = err as AxiosError;
+    return {
+      message:    e.message,
+      status:     e.response?.status,
+      statusText: e.response?.statusText,
+      data:       e.response?.data,
+      url:        e.config?.url,
+      method:     e.config?.method,
+    };
+  }
+  if (err instanceof Error) {
+    return { message: err.message, stack: err.stack };
+  }
+  return { raw: String(err) };
+}
+
 // ─── CoinEx V2 REST client ────────────────────────────────────────────────────
 
 export class CoinExExchange implements IExchange {
@@ -33,6 +52,10 @@ export class CoinExExchange implements IExchange {
     this.accessId  = process.env.COINEX_ACCESS_ID  ?? '';
     this.secretKey = process.env.COINEX_SECRET_KEY ?? '';
 
+    if (!this.accessId || !this.secretKey) {
+      logger.warn('CoinEx credentials not set — authenticated endpoints will fail');
+    }
+
     this.client = axios.create({
       baseURL: 'https://api.coinex.com/v2',
       timeout: 10_000,
@@ -43,19 +66,8 @@ export class CoinExExchange implements IExchange {
   getName(): string { return 'CoinEx'; }
 
   // ─── Signature (CoinEx API v2) ───────────────────────────────────────────
-  //
-  // prepared_str = METHOD + request_path_with_querystring + body? + timestamp
-  //   - body is included only for POST/PUT/DELETE (omitted for GET)
-  //   - request_path starts with /v2/...
-  //   - timestamp = X-COINEX-TIMESTAMP (unix ms as string)
-  //
-  // signed_str = HMAC-SHA256(prepared_str, secret_key)
-  //   encoded with latin-1 (byte-for-byte), output lowercase hex
-  //
-  // ref: https://docs.coinex.com/api/v2/authorization
 
   private sign(method: string, requestPath: string, body: string, timestamp: string): string {
-    // requestPath must include query string if present, e.g. /v2/spot/order?market=BTCUSDT&...
     const prepared = method.toUpperCase() + requestPath + body + timestamp;
     return crypto
       .createHmac('sha256', Buffer.from(this.secretKey, 'latin1'))
@@ -75,18 +87,9 @@ export class CoinExExchange implements IExchange {
   }
 
   // ─── Public: Kline / Candles ─────────────────────────────────────────────
-  //
-  // GET /spot/kline?market=BTCUSDT&period=1hour&limit=200
-  //
-  // Response data item:
-  //   { market, created_at (ms), open, close, high, low, volume, value }
-  //
-  // ref: https://docs.coinex.com/api/v2/spot/market/http/list-market-kline
 
   async getCandles(symbol: string, timeframe: string, limit = 200): Promise<Candle[]> {
     const period = TIMEFRAME_MAP[timeframe] ?? timeframe;
-    const queryString = `market=${symbol}&period=${period}&limit=${limit}`;
-    const requestPath = `/v2/spot/kline?${queryString}`;
 
     try {
       const resp = await this.client.get('/spot/kline', {
@@ -103,7 +106,7 @@ export class CoinExExchange implements IExchange {
       }> = resp.data?.data ?? [];
 
       return raw.map((k) => ({
-        timestamp: k.created_at,          // already in ms
+        timestamp: k.created_at,
         open:      Number(k.open),
         high:      Number(k.high),
         low:       Number(k.low),
@@ -111,22 +114,12 @@ export class CoinExExchange implements IExchange {
         volume:    Number(k.volume),
       }));
     } catch (err) {
-      logger.error(`CoinEx getCandles error [${symbol}/${timeframe}]`, err);
+      logger.error(`CoinEx getCandles error [${symbol}/${timeframe}]`, formatAxiosError(err));
       return [];
     }
   }
 
   // ─── Authenticated: Place order ──────────────────────────────────────────
-  //
-  // POST /spot/order
-  // Body: { market, market_type, side, type, amount, price? }
-  //   - amount and price must be strings
-  //   - market_type: "SPOT" for spot trading
-  //
-  // Response data: { order_id, market, side, type, amount, price,
-  //                  filled_amount, unfilled_amount, ... }
-  //
-  // ref: https://docs.coinex.com/api/v2/spot/order/http/put-order
 
   async placeOrder(params: {
     symbol:    string;
@@ -150,119 +143,117 @@ export class CoinExExchange implements IExchange {
 
     const bodyStr = JSON.stringify(bodyObj);
 
-    const resp = await this.client.post('/spot/order', bodyStr, {
-      headers: this.authHeaders('POST', requestPath, bodyStr),
-    });
+    try {
+      const resp = await this.client.post('/spot/order', bodyStr, {
+        headers: this.authHeaders('POST', requestPath, bodyStr),
+      });
 
-    this.assertOk(resp.data, 'placeOrder');
+      this.assertOk(resp.data, 'placeOrder');
 
-    const d = resp.data.data;
-    return {
-      orderId:     String(d.order_id),
-      symbol:      params.symbol,
-      side:        params.side,
-      price:       Number(d.price ?? 0),
-      quantity:    Number(d.amount),
-      status:      this.mapOrderStatus(d),
-      filledPrice: Number(d.filled_amount) > 0
-        ? Number(d.filled_value) / Number(d.filled_amount)
-        : undefined,
-    };
+      const d = resp.data.data;
+      return {
+        orderId:     String(d.order_id),
+        symbol:      params.symbol,
+        side:        params.side,
+        price:       Number(d.price ?? 0),
+        quantity:    Number(d.amount),
+        status:      this.mapOrderStatus(d),
+        filledPrice: Number(d.filled_amount) > 0
+          ? Number(d.filled_value) / Number(d.filled_amount)
+          : undefined,
+      };
+    } catch (err) {
+      logger.error('CoinEx placeOrder error', formatAxiosError(err));
+      throw err;
+    }
   }
 
   // ─── Authenticated: Cancel order ─────────────────────────────────────────
-  //
-  // POST /spot/cancel-order   ← NOT DELETE (changed in v2)
-  // Body: { market, market_type, order_id (int) }
-  //
-  // ref: https://docs.coinex.com/api/v2/spot/order/http/cancel-order
 
   async cancelOrder(symbol: string, orderId: string): Promise<void> {
     const requestPath = '/v2/spot/cancel-order';
     const bodyStr = JSON.stringify({
       market:      symbol,
       market_type: 'SPOT',
-      order_id:    Number(orderId),   // must be int, not string
+      order_id:    Number(orderId),
     });
 
-    const resp = await this.client.post('/spot/cancel-order', bodyStr, {
-      headers: this.authHeaders('POST', requestPath, bodyStr),
-    });
-
-    this.assertOk(resp.data, 'cancelOrder');
+    try {
+      const resp = await this.client.post('/spot/cancel-order', bodyStr, {
+        headers: this.authHeaders('POST', requestPath, bodyStr),
+      });
+      this.assertOk(resp.data, 'cancelOrder');
+    } catch (err) {
+      logger.error('CoinEx cancelOrder error', formatAxiosError(err));
+      throw err;
+    }
   }
 
   // ─── Authenticated: Get order status ────────────────────────────────────
-  //
-  // GET /spot/order?market=BTCUSDT&market_type=SPOT&order_id=13400
-  //   - query string is included in the signed path
-  //
-  // Response data order status values: "open" | "part_deal" | "done" | "cancel"
-  //
-  // ref: https://docs.coinex.com/api/v2/spot/order/http/get-order-status
 
   async getOrder(symbol: string, orderId: string): Promise<ExchangeOrder> {
     const qs          = `market=${symbol}&market_type=SPOT&order_id=${orderId}`;
     const requestPath = `/v2/spot/order?${qs}`;
 
-    const resp = await this.client.get('/spot/order', {
-      params:  { market: symbol, market_type: 'SPOT', order_id: Number(orderId) },
-      headers: this.authHeaders('GET', requestPath),
-    });
+    try {
+      const resp = await this.client.get('/spot/order', {
+        params:  { market: symbol, market_type: 'SPOT', order_id: Number(orderId) },
+        headers: this.authHeaders('GET', requestPath),
+      });
 
-    this.assertOk(resp.data, 'getOrder');
+      this.assertOk(resp.data, 'getOrder');
 
-    const d = resp.data.data;
-    return {
-      orderId:     String(d.order_id),
-      symbol,
-      side:        d.side,
-      price:       Number(d.price ?? 0),
-      quantity:    Number(d.amount),
-      status:      this.mapOrderStatus(d),
-      filledPrice: Number(d.filled_amount) > 0
-        ? Number(d.filled_value) / Number(d.filled_amount)
-        : undefined,
-      filledAt:    d.updated_at ?? undefined,
-    };
+      const d = resp.data.data;
+      return {
+        orderId:     String(d.order_id),
+        symbol,
+        side:        d.side,
+        price:       Number(d.price ?? 0),
+        quantity:    Number(d.amount),
+        status:      this.mapOrderStatus(d),
+        filledPrice: Number(d.filled_amount) > 0
+          ? Number(d.filled_value) / Number(d.filled_amount)
+          : undefined,
+        filledAt:    d.updated_at ?? undefined,
+      };
+    } catch (err) {
+      logger.error('CoinEx getOrder error', formatAxiosError(err));
+      throw err;
+    }
   }
 
   // ─── Authenticated: Get balances ─────────────────────────────────────────
-  //
-  // GET /assets/spot/balance   (no query params)
-  //
-  // Response data: [{ ccy, available, frozen }, ...]
-  //
-  // ref: https://docs.coinex.com/api/v2/assets/balance/http/get-spot-balance
 
   async getBalance(): Promise<Record<string, number>> {
     const requestPath = '/v2/assets/spot/balance';
 
-    const resp = await this.client.get('/assets/spot/balance', {
-      headers: this.authHeaders('GET', requestPath),
-    });
+    try {
+      const resp = await this.client.get('/assets/spot/balance', {
+        headers: this.authHeaders('GET', requestPath),
+      });
 
-    this.assertOk(resp.data, 'getBalance');
+      this.assertOk(resp.data, 'getBalance');
 
-    const result: Record<string, number> = {};
-    for (const item of resp.data.data ?? []) {
-      result[item.ccy] = Number(item.available);
+      const result: Record<string, number> = {};
+      for (const item of resp.data.data ?? []) {
+        result[item.ccy] = Number(item.available);
+      }
+      return result;
+    } catch (err) {
+      logger.error('CoinEx getBalance error', formatAxiosError(err));
+      throw err;
     }
-    return result;
   }
 
   // ─── Helpers ─────────────────────────────────────────────────────────────
 
-  /** Map CoinEx v2 order status to internal ExchangeOrder status */
   private mapOrderStatus(d: { status?: string; unfilled_amount?: string; amount?: string }):
     'open' | 'filled' | 'cancelled' {
     if (d.status === 'done')   return 'filled';
     if (d.status === 'cancel') return 'cancelled';
-    // 'open' or 'part_deal'
     return 'open';
   }
 
-  /** Throw if CoinEx returns a non-zero code */
   private assertOk(responseData: { code?: number; message?: string }, context: string): void {
     if (responseData?.code !== 0) {
       throw new Error(
@@ -272,7 +263,7 @@ export class CoinExExchange implements IExchange {
   }
 }
 
-// ─── Paper trading (simulates fills, uses real public candle data) ────────────
+// ─── Paper trading ────────────────────────────────────────────────────────────
 
 export class PaperExchange implements IExchange {
   private _balance: Record<string, number>;
@@ -285,7 +276,6 @@ export class PaperExchange implements IExchange {
 
   getName(): string { return 'Paper'; }
 
-  /** Use the real public kline endpoint (no auth needed) */
   async getCandles(symbol: string, timeframe: string, limit = 200): Promise<Candle[]> {
     return new CoinExExchange().getCandles(symbol, timeframe, limit);
   }
@@ -313,7 +303,6 @@ export class PaperExchange implements IExchange {
 
     this.orders.set(id, order);
 
-    // Simulate balance update for market orders
     if (isFilled && params.price) {
       const usdValue = params.quantity * params.price;
       const base     = params.symbol.replace(/USDT$/, '');
