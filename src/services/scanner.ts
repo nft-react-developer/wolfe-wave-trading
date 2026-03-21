@@ -119,6 +119,17 @@ export class Scanner {
           const waves = detectWolfeWaves(candles, symbol, timeframe);
 
           for (const wave of waves) {
+            // En spot solo se pueden operar posiciones long (bullish)
+            // Short requiere margin/futures
+            if (config.tradingMode === 'real' && wave.direction === 'bearish') {
+                logger.info('Wave skipped: bearish direction not supported in spot real mode', {
+                  symbol: wave.symbol,
+                  timeframe: wave.timeframe,
+                  p5: wave.p5.price,
+                });
+                continue;
+            }
+            
             const candleDurationMs = this.timeframeToMs(timeframe);
             const exists = await waveAlreadyExists(wave, candleDurationMs * 5);
             if (exists) continue;
