@@ -171,7 +171,7 @@ export function createRouter(exchange: IExchange, scanner: Scanner) {
 
       res.json({ data: rows, count: rows.length });
     } catch (err) {
-      res.status(500).json({ error: 'Internal server error' });
+      res.status(500).json({ error: 'Internal server error', err }, );
     }
   });
 
