@@ -300,15 +300,50 @@ export function createRouter(exchange: IExchange, scanner: Scanner) {
    * GET /api/account/balance
    * Returns available balances from the exchange (real or paper).
    */
-  router.get('/account/balance', async (_req, res) => {
-    try {
-      const balances = await exchange.getBalance();
-      res.json({ exchange: exchange.getName(), data: balances });
-    } catch (err) {
-      logger.error('GET /account/balance error', err);
-      res.status(500).json({ error: 'Failed to fetch balance' });
+router.get('/account/balance', async (_req, res) => {
+  try {
+    const balances = await exchange.getBalance();
+
+    // Convertir cada moneda a USD usando el último precio de CoinEx
+    let totalUsd = 0;
+    const usdValues: Record<string, number> = {};
+
+    for (const [ccy, amount] of Object.entries(balances)) {
+      if (amount <= 0) continue;
+
+      if (ccy === 'USDT' || ccy === 'USDC' || ccy === 'BUSD') {
+        // Stablecoins = 1:1 con USD
+        usdValues[ccy] = amount;
+        totalUsd += amount;
+      } else {
+        // Obtener precio via último candle del par CCY/USDT
+        try {
+          const candles = await exchange.getCandles(`${ccy}USDT`, '1min', 1);
+          if (candles.length > 0) {
+            const price = candles[candles.length - 1].close;
+            const usd = amount * price;
+            usdValues[ccy] = usd;
+            totalUsd += usd;
+          } else {
+            usdValues[ccy] = 0;
+          }
+        } catch {
+          usdValues[ccy] = 0;
+        }
+      }
     }
-  });
+
+    res.json({
+      exchange: exchange.getName(),
+      data: balances,
+      usdValues,
+      totalUsd: Number(totalUsd.toFixed(2)),
+    });
+  } catch (err) {
+    logger.error('GET /account/balance error', err);
+    res.status(500).json({ error: 'Failed to fetch balance' });
+  }
+});
 
   // ─── Bot control ─────────────────────────────────────────────────────────
 
