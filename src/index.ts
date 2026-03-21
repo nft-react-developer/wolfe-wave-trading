@@ -106,6 +106,7 @@ async function main() {
     logger.info(`  POST /api/bot/pause`);
     logger.info(`  POST /api/bot/resume`);
     logger.info(`  PATCH /api/config`);
+    logger.info(`  POST /api/trades/close-all`);
     logger.info(`Price feed: ${config.priceFeed.toUpperCase()}`);
   });
 }
