@@ -89,11 +89,10 @@ export async function waveAlreadyExists(wave: WolfeWave, timeWindowMs: number): 
 export async function tradeAlreadyOpenForWave(wave: WolfeWave, timeWindowMs: number): Promise<boolean> {
   const db = await getDb();
 
-  const p5Low  = wave.p5.price * 0.999;
-  const p5High = wave.p5.price * 1.001;
   const minTime = wave.detectedAt - timeWindowMs;
 
-  // Busca ondas similares que tengan un trade abierto vinculado
+  // Basta con que haya cualquier trade abierto para el mismo
+  // símbolo + timeframe + dirección — sin depender del precio de P5
   const existing = await db
     .select({ id: wolfeWaves.id })
     .from(wolfeWaves)
@@ -104,8 +103,6 @@ export async function tradeAlreadyOpenForWave(wave: WolfeWave, timeWindowMs: num
         eq(wolfeWaves.direction, wave.direction),
         eq(wolfeWaves.timeframe, wave.timeframe),
         gte(wolfeWaves.detectedAt, minTime),
-        gte(wolfeWaves.p5Price, p5Low.toFixed(8)),
-        lte(wolfeWaves.p5Price, p5High.toFixed(8)),
         eq(trades.status, 'open'),
         eq(trades.mode, config.tradingMode),
       )
