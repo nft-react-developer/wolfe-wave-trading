@@ -317,8 +317,20 @@ router.post('/trades/close-all', async (_req, res) => {
       ]);
 
       const initialCapital = config.initialCapital;
-      const balance = initialCapital + tradeStats.totalPnl;
-      const roi = ((balance - initialCapital) / initialCapital) * 100;
+      // En modo real obtenemos el balance directamente del exchange
+      let currentBalance: number;
+      if (config.tradingMode === 'real') {
+        try {
+          const balances = await exchange.getBalance();
+          currentBalance = balances['USDT'] ?? 0;
+        } catch {
+          currentBalance = initialCapital + tradeStats.totalPnl;
+        }
+      } else {
+        currentBalance = initialCapital + tradeStats.totalPnl;
+      }
+
+      const roi = ((currentBalance - initialCapital) / initialCapital) * 100;
 
       res.json({
         data: {
@@ -327,7 +339,7 @@ router.post('/trades/close-all', async (_req, res) => {
             active: !scanner.isPaused(),
           },
           initialCapital,
-          currentBalance: balance,
+          currentBalance: currentBalance.toFixed(2),
           roi,
           waves: waveStats,
           trades: tradeStats,
