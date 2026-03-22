@@ -339,7 +339,7 @@ router.post('/trades/close-all', async (_req, res) => {
             active: !scanner.isPaused(),
           },
           initialCapital,
-          currentBalance: currentBalance.toFixed(2),
+          currentBalance: currentBalance,
           roi,
           waves: waveStats,
           trades: tradeStats,
