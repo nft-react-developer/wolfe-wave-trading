@@ -153,7 +153,7 @@ export function createRouter(exchange: IExchange, scanner: Scanner) {
         and(eq(trades.mode, mode as TradeMode), eq(trades.status, 'open'))
       ).orderBy(desc(trades.entryTime));
 
-      res.json({ data: rows, count: rows.length });
+      res.json({ count: rows.length,data: rows });
     } catch (err) {
       res.status(500).json({ error: 'Internal server error', err }, );
     }
