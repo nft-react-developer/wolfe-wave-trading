@@ -199,6 +199,7 @@ export class TradeService {
 
     let entryOrderId: string | undefined;
     let slOrderId:    string | undefined;
+    let filledQuantity: number = quantity; // default to intended quantity, will adjust after fill if needed
 
     try {
 
@@ -212,24 +213,27 @@ export class TradeService {
         sl:        wave?.stopLoss,
       });
 
-      const entryOrder = await this.exchange.placeOrder({
-        symbol:   wave.symbol,
-        side:     orderSide,
-        type:     'market',
-        quantity,
-        price:    wave.entryPrice,
-      });
-      entryOrderId = entryOrder.orderId;
+    const entryOrder = await this.exchange.placeOrder({
+      symbol:   wave.symbol,
+      side:     orderSide,
+      type:     'market',
+      quantity,
+      price:    wave.entryPrice,
+    });
+    entryOrderId = entryOrder.orderId;
 
-      // SL order — only placed in real mode (paper tracks it manually)
-      if (this.mode === 'real') {
-        const slOrder = await this.exchange.placeOrder({
-          symbol:   wave.symbol,
-          side:     orderSide === 'buy' ? 'sell' : 'buy',
-          type:     'limit',
-          quantity,
-          price:    wave.stopLoss,
-        });
+    // Usar la cantidad real ejecutada para el SL
+    // evita error "balance not enough" por diferencia de fees/slippage
+    filledQuantity = entryOrder.quantity > 0 ? entryOrder.quantity : quantity;
+
+    if (this.mode === 'real') {
+      const slOrder = await this.exchange.placeOrder({
+        symbol:   wave.symbol,
+        side:     orderSide === 'buy' ? 'sell' : 'buy',
+        type:     'limit',
+        quantity: filledQuantity,   // ← cantidad real del fill
+        price:    wave.stopLoss,
+      });
         slOrderId = slOrder.orderId;
       }
     } catch (err) {
@@ -250,7 +254,7 @@ export class TradeService {
       status:       'open',          // enum literal       ✓
       entryPrice:   wave.entryPrice.toFixed(8),
       entryTime:    now,
-      quantity:     quantity.toFixed(8),
+      quantity:     filledQuantity.toFixed(8), 
       usdAmount:    usdAmount.toFixed(2),
       stopLoss:     wave.stopLoss.toFixed(8),
       target1:      wave.target1.toFixed(8),

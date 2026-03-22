@@ -165,12 +165,20 @@ export class CoinExExchange implements IExchange {
       this.assertOk(resp.data, 'placeOrder');
 
       const d = resp.data.data;
+
+      // Para market buy, d.amount es el importe USDT enviado, no las unidades base.
+      // d.filled_amount contiene la cantidad base realmente ejecutada — la usamos
+      // para que el SL posterior use la cantidad exacta disponible en el balance.
+      const filledQty = Number(d.filled_amount) > 0
+        ? Number(d.filled_amount)
+        : Number(d.amount);
+
       return {
         orderId:     String(d.order_id),
         symbol:      params.symbol,
         side:        params.side,
         price:       Number(d.price ?? 0),
-        quantity:    Number(d.amount),
+        quantity:    filledQty,
         status:      this.mapOrderStatus(d),
         filledPrice: Number(d.filled_amount) > 0
           ? Number(d.filled_value) / Number(d.filled_amount)
