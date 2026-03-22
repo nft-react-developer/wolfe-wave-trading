@@ -123,22 +123,6 @@ export function createRouter(exchange: IExchange, scanner: Scanner) {
   });
 
   /**
-   * GET /api/trades/:id
-   */
-  router.get('/trades/:id', async (req, res) => {
-    try {
-      const db = await getDb();
-      const [trade] = await db.select().from(trades).where(eq(trades.id, Number(req.params.id)));
-      if (!trade) return res.status(404).json({ error: 'Trade not found' });
-
-      const [wave] = await db.select().from(wolfeWaves).where(eq(wolfeWaves.id, trade.wolfeWaveId));
-      res.json({ data: trade, wave });
-    } catch (err) {
-      res.status(500).json({ error: 'Internal server error' });
-    }
-  });
-
-  /**
    * GET /api/trades/stats/summary
    * Query: mode, symbol, timeframe, from, to
    */
@@ -172,6 +156,114 @@ export function createRouter(exchange: IExchange, scanner: Scanner) {
       res.json({ data: rows, count: rows.length });
     } catch (err) {
       res.status(500).json({ error: 'Internal server error', err }, );
+    }
+  });
+
+  /**
+ * POST /api/trades/close-all
+ * Cierra todas las posiciones abiertas con órdenes de venta a mercado.
+ */
+router.post('/trades/close-all', async (_req, res) => {
+  try {
+    const db = await getDb();
+
+    const openTrades = await db
+      .select()
+      .from(trades)
+      .where(and(eq(trades.status, 'open'), eq(trades.mode, config.tradingMode)));
+
+    if (openTrades.length === 0) {
+      return res.json({ closed: 0, results: [] });
+    }
+
+    const results = [];
+
+    for (const trade of openTrades) {
+      try {
+        const isLong   = trade.side === 'long';
+        const qty      = Number(trade.quantity)
+          - Number(trade.closedQty1)
+          - Number(trade.closedQty2)
+          - Number(trade.closedQty3)
+          - Number(trade.closedQty4);
+
+        // Obtener precio actual
+        const candles = await exchange.getCandles(trade.symbol, '1min', 1);
+        const currentPrice = candles[candles.length - 1]?.close ?? Number(trade.entryPrice);
+
+        // Ejecutar venta a mercado en modo real
+        if (config.tradingMode === 'real') {
+          // Cancelar SL pendiente si existe
+          if (trade.slOrderId) {
+            try {
+              await exchange.cancelOrder(trade.symbol, trade.slOrderId);
+            } catch (err) {
+              logger.warn(`close-all: could not cancel SL order for trade #${trade.id}`, err);
+            }
+          }
+
+          await exchange.placeOrder({
+            symbol:   trade.symbol,
+            side:     isLong ? 'sell' : 'buy',
+            type:     'market',
+            quantity: qty,
+            price:    currentPrice,
+          });
+        }
+
+        // Calcular PnL y cerrar en DB
+        const entry  = Number(trade.entryPrice);
+        const pnl    = isLong
+          ? (currentPrice - entry) * qty
+          : (entry - currentPrice) * qty;
+        const pnlPct = (pnl / Number(trade.usdAmount)) * 100;
+
+        await db.update(trades).set({
+          status:      'closed',
+          exitPrice:   currentPrice.toFixed(8),
+          exitTime:    Date.now(),
+          closeReason: 'manual',
+          pnl:         pnl.toFixed(2),
+          pnlPct:      pnlPct.toFixed(4),
+        }).where(eq(trades.id, trade.id!));
+
+        logger.info(`close-all: trade #${trade.id} closed`, {
+          symbol: trade.symbol,
+          price:  currentPrice,
+          pnl:    pnl.toFixed(2),
+        });
+
+        results.push({ id: trade.id, symbol: trade.symbol, pnl: Number(pnl.toFixed(2)), status: 'closed' });
+      } catch (err) {
+        logger.error(`close-all: failed to close trade #${trade.id}`, err);
+        results.push({ id: trade.id, symbol: trade.symbol, status: 'error' });
+      }
+    }
+
+    res.json({
+      closed:  results.filter(r => r.status === 'closed').length,
+      errors:  results.filter(r => r.status === 'error').length,
+      results,
+    });
+  } catch (err) {
+    logger.error('POST /trades/close-all error', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+  /**
+   * GET /api/trades/:id
+   */
+  router.get('/trades/:id', async (req, res) => {
+    try {
+      const db = await getDb();
+      const [trade] = await db.select().from(trades).where(eq(trades.id, Number(req.params.id)));
+      if (!trade) return res.status(404).json({ error: 'Trade not found' });
+
+      const [wave] = await db.select().from(wolfeWaves).where(eq(wolfeWaves.id, trade.wolfeWaveId));
+      res.json({ data: trade, wave });
+    } catch (err) {
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 
@@ -344,98 +436,6 @@ router.get('/account/balance', async (_req, res) => {
   }
 });
 
-
-/**
- * POST /api/trades/close-all
- * Cierra todas las posiciones abiertas con órdenes de venta a mercado.
- */
-router.post('/trades/close-all', async (_req, res) => {
-  try {
-    const db = await getDb();
-
-    const openTrades = await db
-      .select()
-      .from(trades)
-      .where(and(eq(trades.status, 'open'), eq(trades.mode, config.tradingMode)));
-
-    if (openTrades.length === 0) {
-      return res.json({ closed: 0, results: [] });
-    }
-
-    const results = [];
-
-    for (const trade of openTrades) {
-      try {
-        const isLong   = trade.side === 'long';
-        const qty      = Number(trade.quantity)
-          - Number(trade.closedQty1)
-          - Number(trade.closedQty2)
-          - Number(trade.closedQty3)
-          - Number(trade.closedQty4);
-
-        // Obtener precio actual
-        const candles = await exchange.getCandles(trade.symbol, '1min', 1);
-        const currentPrice = candles[candles.length - 1]?.close ?? Number(trade.entryPrice);
-
-        // Ejecutar venta a mercado en modo real
-        if (config.tradingMode === 'real') {
-          // Cancelar SL pendiente si existe
-          if (trade.slOrderId) {
-            try {
-              await exchange.cancelOrder(trade.symbol, trade.slOrderId);
-            } catch (err) {
-              logger.warn(`close-all: could not cancel SL order for trade #${trade.id}`, err);
-            }
-          }
-
-          await exchange.placeOrder({
-            symbol:   trade.symbol,
-            side:     isLong ? 'sell' : 'buy',
-            type:     'market',
-            quantity: qty,
-            price:    currentPrice,
-          });
-        }
-
-        // Calcular PnL y cerrar en DB
-        const entry  = Number(trade.entryPrice);
-        const pnl    = isLong
-          ? (currentPrice - entry) * qty
-          : (entry - currentPrice) * qty;
-        const pnlPct = (pnl / Number(trade.usdAmount)) * 100;
-
-        await db.update(trades).set({
-          status:      'closed',
-          exitPrice:   currentPrice.toFixed(8),
-          exitTime:    Date.now(),
-          closeReason: 'manual',
-          pnl:         pnl.toFixed(2),
-          pnlPct:      pnlPct.toFixed(4),
-        }).where(eq(trades.id, trade.id!));
-
-        logger.info(`close-all: trade #${trade.id} closed`, {
-          symbol: trade.symbol,
-          price:  currentPrice,
-          pnl:    pnl.toFixed(2),
-        });
-
-        results.push({ id: trade.id, symbol: trade.symbol, pnl: Number(pnl.toFixed(2)), status: 'closed' });
-      } catch (err) {
-        logger.error(`close-all: failed to close trade #${trade.id}`, err);
-        results.push({ id: trade.id, symbol: trade.symbol, status: 'error' });
-      }
-    }
-
-    res.json({
-      closed:  results.filter(r => r.status === 'closed').length,
-      errors:  results.filter(r => r.status === 'error').length,
-      results,
-    });
-  } catch (err) {
-    logger.error('POST /trades/close-all error', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
 
   // ─── Bot control ─────────────────────────────────────────────────────────
 
