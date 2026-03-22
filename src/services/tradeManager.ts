@@ -480,6 +480,28 @@ export class TradeService {
 
     const isLong = trade.side === 'long';
 
+    // Al principio de evaluateTrade, en modo real verificar si el SL ya fue ejecutado en el exchange
+    if (this.mode === 'real' && trade.slOrderId) {
+      try {
+        const slOrder = await this.exchange.getOrder(trade.symbol, trade.slOrderId);
+        if (slOrder.status === 'filled') {
+          const fillPrice = slOrder.filledPrice ?? Number(trade.stopLoss);
+          const remaining = qty - closedQty1 - closedQty2 - closedQty3 - closedQty4;
+          const pnl = this.calcPnl(entry, fillPrice, remaining, isLong);
+          await this.closeTrade(trade.id!, fillPrice, 'sl', pnl);
+          await db.update(wolfeWaves)
+            .set({ hitStopLoss: true })
+            .where(eq(wolfeWaves.id, trade.wolfeWaveId));
+          logger.info('SL order filled on exchange — trade closed', {
+            id: trade.id, symbol: trade.symbol, fillPrice,
+          });
+          return;
+        }
+      } catch (err) {
+        logger.warn(`Could not check SL order status for trade #${trade.id}`, err);
+      }
+    }
+
     // ── Stop Loss ───────────────────────────────────────────────────────────
     const slHit = isLong ? currentPrice <= sl : currentPrice >= sl;
     if (slHit) {
