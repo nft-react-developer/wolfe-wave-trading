@@ -5,6 +5,7 @@ import { TradeService, RiskGuard } from '../services/tradeManager';
 import { PollingPriceFeed } from '../services/priceFeed';
 import { config } from '../utils/config';
 import { logger } from '../utils/logger';
+import { telegram } from './telegram';
 
 export class Scanner {
   private running = false;
@@ -131,6 +132,21 @@ export class Scanner {
 
             const waveId = await saveWave(wave);
 
+            // // Telegram wave notification disabled — only daily report is sent
+            // await telegram.notifyWaveDetected({
+            //   symbol: wave.symbol,
+            //   timeframe: wave.timeframe,
+            //   direction: wave.direction,
+            //   shape: wave.shape,
+            //   isPerfect: wave.isPerfect,
+            //   entryPrice: wave.entryPrice,
+            //   stopLoss: wave.stopLoss,
+            //   target1: wave.target1,
+            //   target2: wave.target2,
+            //   target3: wave.target3,
+            //   ema50: wave.ema50,
+            // });
+
             const hasOpenTrade = await tradeAlreadyOpenForWave(wave, candleDurationMs * 10);
             if (hasOpenTrade) {
               logger.info('Trade skipped: already have an open trade for this wave', {
@@ -148,7 +164,22 @@ export class Scanner {
             }
 
             const availableCapital = await this.getAvailableCapital();
-            await this.tradeService.openTrade(wave, waveId, availableCapital);
+            const tradeOpened = await this.tradeService.openTrade(wave, waveId, availableCapital);
+
+            if (tradeOpened) {
+              await telegram.notifyTradeOpened({
+                id: tradeOpened.id,
+                symbol: tradeOpened.symbol,
+                side: tradeOpened.side,
+                entryPrice: tradeOpened.entryPrice,
+                stopLoss: tradeOpened.stopLoss,
+                target1: tradeOpened.target1,
+                target2: tradeOpened.target2,
+                usdAmount: tradeOpened.usdAmount,
+                quantity: tradeOpened.quantity,
+                mode: tradeOpened.mode,
+              });
+            }
           }
         } catch (err) {
           logger.error(`Error scanning ${symbol}/${timeframe}`, err);
