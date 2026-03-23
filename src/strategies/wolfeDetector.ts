@@ -205,7 +205,9 @@ function buildWave(
   const lastLegSize  = Math.abs(p5.price - p3.price);
   const rawBuffer    = lastLegSize * 0.10;
   const maxBuffer    = p5.price * 0.02;          // never more than 2% of price
-  const slBuffer     = Math.min(rawBuffer, maxBuffer);
+  // después — mínimo 0.5% del precio para evitar ejecución inmediata por spread/fees
+  const minBuffer = p5.price * 0.005;
+  const slBuffer  = Math.max(Math.min(rawBuffer, maxBuffer), minBuffer);
 
   const stopLoss = direction === 'bullish'
     ? p5.price - slBuffer   // long: SL just below P5
