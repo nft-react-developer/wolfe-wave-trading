@@ -200,8 +200,7 @@ export class TradeService {
     let entryOrderId: string | undefined;
     let slOrderId:    string | undefined;
     let filledQuantity: number = quantity; // default to intended quantity, will adjust after fill if needed
-    let adjustedStopLoss: number = wave.stopLoss; // may adjust based on actual fill price to maintain same buffer
-    
+    let adjustedSL: number = wave.stopLoss; // may adjust based on actual fill price to maintain same buffer
     try {
 
     logger.info('Placing entry order', {
@@ -230,17 +229,28 @@ export class TradeService {
     // Usar el precio real de ejecución para el SL
     const filledPrice = entryOrder.filledPrice ?? wave.entryPrice;
 
-    // Recalcular SL basado en precio real de fill
-    const slBuffer = Math.abs(wave.entryPrice - wave.stopLoss); // buffer original
-    adjustedStopLoss = filledPrice - slBuffer; // misma distancia, desde precio real
+   // Recalcular SL basado en el precio real del fill para compensar slippage
+    const slDistance     = Math.abs(wave.entryPrice - wave.stopLoss);
+    adjustedSL     = wave.direction === 'bullish'
+      ? filledPrice - slDistance
+      : filledPrice + slDistance;
+
+    logger.info('SL ajustado al precio real del fill', {
+      symbol:        wave.symbol,
+      p5Price:       wave.entryPrice,
+      filledPrice,
+      slOriginal:    wave.stopLoss,
+      slAdjustado:   adjustedSL,
+      distancia:     slDistance.toFixed(8),
+    });
 
     if (this.mode === 'real') {
       const slOrder = await this.exchange.placeOrder({
         symbol:   wave.symbol,
         side:     orderSide === 'buy' ? 'sell' : 'buy',
         type:     'limit',
-        quantity: filledQuantity,   // ← cantidad real del fill
-        price:    adjustedStopLoss,
+        quantity: filledQuantity,
+        price:    adjustedSL,
       });
         slOrderId = slOrder.orderId;
       }
@@ -264,7 +274,7 @@ export class TradeService {
       entryTime:    now,
       quantity:     filledQuantity.toFixed(8), 
       usdAmount:    usdAmount.toFixed(2),
-      stopLoss:     adjustedStopLoss.toFixed(8),
+      stopLoss:     adjustedSL.toFixed(8),
       target1:      wave.target1.toFixed(8),
       target2:      wave.target2.toFixed(8),
       target3:      wave.target3?.toFixed(8),
