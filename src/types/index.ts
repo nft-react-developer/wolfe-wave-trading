@@ -223,4 +223,5 @@ export interface AppConfig {
   trailingStopPct:      number;   // only used when method=percentage (default: 0.015 = 1.5%)
   trailingStopMinMove:  number;   // min price change to update SL on exchange (default: 0.003 = 0.3%)
   symbolUpdateCron: string;       // when to update the list of scanned symbols daily (default: '5 0 * * *' = 00:05 UTC)
+  updateSymbolsOnStartup: boolean; // if true, updates symbols at startup based on latest volume snapshot (recommended for production)
 }

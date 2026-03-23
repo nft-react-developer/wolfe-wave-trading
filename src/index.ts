@@ -74,7 +74,9 @@ async function main() {
   try {
     await snapshotDailyVolumes();
     const topSymbols = await getTopSymbols();
-    scanner.updateSymbols(topSymbols);
+    if (config.updateSymbolsOnStartup) {
+      scanner.updateSymbols(topSymbols);
+    }
   } catch (err) {
     logger.warn('Symbol selector startup failed, using config.scanSymbols as fallback', err);
   }
