@@ -200,7 +200,8 @@ export class TradeService {
     let entryOrderId: string | undefined;
     let slOrderId:    string | undefined;
     let filledQuantity: number = quantity; // default to intended quantity, will adjust after fill if needed
-
+    let adjustedStopLoss: number = wave.stopLoss; // may adjust based on actual fill price to maintain same buffer
+    
     try {
 
     logger.info('Placing entry order', {
@@ -226,13 +227,20 @@ export class TradeService {
     // evita error "balance not enough" por diferencia de fees/slippage
     filledQuantity = entryOrder.quantity > 0 ? entryOrder.quantity : quantity;
 
+    // Usar el precio real de ejecución para el SL
+    const filledPrice = entryOrder.filledPrice ?? wave.entryPrice;
+
+    // Recalcular SL basado en precio real de fill
+    const slBuffer = Math.abs(wave.entryPrice - wave.stopLoss); // buffer original
+    adjustedStopLoss = filledPrice - slBuffer; // misma distancia, desde precio real
+
     if (this.mode === 'real') {
       const slOrder = await this.exchange.placeOrder({
         symbol:   wave.symbol,
         side:     orderSide === 'buy' ? 'sell' : 'buy',
         type:     'limit',
         quantity: filledQuantity,   // ← cantidad real del fill
-        price:    wave.stopLoss,
+        price:    adjustedStopLoss,
       });
         slOrderId = slOrder.orderId;
       }
@@ -256,7 +264,7 @@ export class TradeService {
       entryTime:    now,
       quantity:     filledQuantity.toFixed(8), 
       usdAmount:    usdAmount.toFixed(2),
-      stopLoss:     wave.stopLoss.toFixed(8),
+      stopLoss:     adjustedStopLoss.toFixed(8),
       target1:      wave.target1.toFixed(8),
       target2:      wave.target2.toFixed(8),
       target3:      wave.target3?.toFixed(8),
