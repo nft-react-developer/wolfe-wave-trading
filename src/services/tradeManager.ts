@@ -614,12 +614,26 @@ export class TradeService {
         logger.info('TP2 hit (fat M/W) — partial close', { id: trade.id, price: currentPrice });
       } else {
         const remaining = qty - closedQty1;
-        const pnl = this.calcPnl(entry, currentPrice, remaining, isLong);
         // Cancelar stop order ya que vamos a cerrar la posición
         if (this.mode === 'real' && trade.slOrderId) {
           try { await this.exchange.cancelStopOrder(trade.symbol, trade.slOrderId); }
           catch (err) { logger.warn('Could not cancel stop order at TP2 close', err); }
         }
+        // Vender el remaining en el exchange (real mode)
+        if (this.mode === 'real') {
+          try {
+            await this.exchange.placeOrder({
+              symbol:   trade.symbol,
+              side:     isLong ? 'sell' : 'buy',
+              type:     'market',
+              quantity: remaining,
+              price:    currentPrice,
+            });
+          } catch (err) {
+            logger.error('TP2 full close order failed', err);
+          }
+        }
+        const pnl = this.calcPnl(entry, currentPrice, remaining, isLong);
         await this.closeTrade(trade.id!, currentPrice, 'tp2', pnl);
         await db.update(wolfeWaves)
           .set({ reachedTarget2: true })
@@ -658,11 +672,25 @@ export class TradeService {
           logger.info('TP3 hit — partial close', { id: trade.id, price: currentPrice });
         } else {
           const remaining = qty - closedQty1 - closedQty2;
-          const pnl = this.calcPnl(entry, currentPrice, remaining, isLong);
           if (this.mode === 'real' && trade.slOrderId) {
             try { await this.exchange.cancelStopOrder(trade.symbol, trade.slOrderId); }
             catch (err) { logger.warn('Could not cancel stop order at TP3 close', err); }
           }
+          // Vender el remaining en el exchange (real mode)
+          if (this.mode === 'real') {
+            try {
+              await this.exchange.placeOrder({
+                symbol:   trade.symbol,
+                side:     isLong ? 'sell' : 'buy',
+                type:     'market',
+                quantity: remaining,
+                price:    currentPrice,
+              });
+            } catch (err) {
+              logger.error('TP3 full close order failed', err);
+            }
+          }
+          const pnl = this.calcPnl(entry, currentPrice, remaining, isLong);
           await this.closeTrade(trade.id!, currentPrice, 'tp3', pnl);
           await db.update(wolfeWaves)
             .set({ reachedTarget3: true })
@@ -679,11 +707,25 @@ export class TradeService {
 
       if (tp4Hit) {
         const remaining = qty - closedQty1 - closedQty2 - closedQty3;
-        const pnl = this.calcPnl(entry, currentPrice, remaining, isLong);
         if (this.mode === 'real' && trade.slOrderId) {
           try { await this.exchange.cancelStopOrder(trade.symbol, trade.slOrderId); }
           catch (err) { logger.warn('Could not cancel stop order at TP4 close', err); }
         }
+        // Vender el remaining en el exchange (real mode)
+        if (this.mode === 'real') {
+          try {
+            await this.exchange.placeOrder({
+              symbol:   trade.symbol,
+              side:     isLong ? 'sell' : 'buy',
+              type:     'market',
+              quantity: remaining,
+              price:    currentPrice,
+            });
+          } catch (err) {
+            logger.error('TP4 full close order failed', err);
+          }
+        }
+        const pnl = this.calcPnl(entry, currentPrice, remaining, isLong);
         await this.closeTrade(trade.id!, currentPrice, 'tp4', pnl);
         logger.info('TP4 (161.8%) hit!', { id: trade.id, price: currentPrice });
       }
