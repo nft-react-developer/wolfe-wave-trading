@@ -158,6 +158,60 @@ function validateBearish(
   return { valid: true, isPerfect };
 }
 
+// ─── Timeframe helpers ───────────────────────────────────────────────────────
+
+/**
+ * Returns pivot detection strength (candles on each side) based on timeframe.
+ * Higher timeframes require a wider lookback to filter out noise.
+ */
+function pivotStrengthForTimeframe(timeframe: string): number {
+  const map: Record<string, number> = {
+    '1min':  2,
+    '3min':  2,
+    '5min':  3,
+    '15min': 3,
+    '30min': 4,
+    '1hour': 4,
+    '2hour': 5,
+    '4hour': 6,
+    '1day':  7,
+  };
+  return map[timeframe] ?? 3;
+}
+
+/**
+ * Returns the minimum SL buffer as a fraction of the entry price, per timeframe.
+ * Higher timeframes have naturally wider candle ranges, so the minimum buffer
+ * must be larger to avoid the stop being triggered by normal intra-candle noise.
+ *
+ * Examples at entry price 227:
+ *   1min  → 0.4%  → ~$0.91
+ *   15min → 1.2%  → ~$2.72
+ *   1hour → 2.0%  → ~$4.55
+ *   4hour → 3.0%  → ~$6.81
+ *   1day  → 5.0%  → ~$11.35
+ *
+ * Values calibrated for the full universe of scanned pairs (BTC, ETH,
+ * mid-caps and volatile altcoins). Altcoin-grade margins ensure the SL
+ * is never placed inside normal candle noise for any pair in the scanner.
+ */
+function minSlBufferPctForTimeframe(timeframe: string): number {
+  const map: Record<string, number> = {
+    '1min':  0.004,
+    '3min':  0.006,
+    '5min':  0.008,
+    '15min': 0.012,
+    '30min': 0.015,
+    '1hour': 0.020,
+    '2hour': 0.025,
+    '4hour': 0.030,
+    '6hour': 0.035,
+    '12hour':0.040,
+    '1day':  0.050,
+  };
+  return map[timeframe] ?? 0.015;
+}
+
 // ─── Wave builder ─────────────────────────────────────────────────────────────
 
 function buildWave(
@@ -205,8 +259,9 @@ function buildWave(
   const lastLegSize  = Math.abs(p5.price - p3.price);
   const rawBuffer    = lastLegSize * 0.10;
   const maxBuffer    = p5.price * 0.02;          // never more than 2% of price
-  // después — mínimo 0.5% del precio para evitar ejecución inmediata por spread/fees
-  const minBuffer = p5.price * 0.005;
+  // después — mínimo dinámico por timeframe para evitar ejecución inmediata por spread/fees.
+  // En timeframes altos el rango de cada vela es mayor, por lo que el margen debe serlo también.
+  const minBuffer = p5.price * minSlBufferPctForTimeframe(timeframe);
   const slBuffer  = Math.max(Math.min(rawBuffer, maxBuffer), minBuffer);
 
   const stopLoss = direction === 'bullish'
@@ -264,27 +319,6 @@ function buildWave(
     macdHistogram: isNaN(macdHistogram) ? undefined : macdHistogram,
     detectedAt: Date.now(),
   };
-}
-
-// ─── Timeframe helpers ───────────────────────────────────────────────────────
-
-/**
- * Returns pivot detection strength (candles on each side) based on timeframe.
- * Higher timeframes require a wider lookback to filter out noise.
- */
-function pivotStrengthForTimeframe(timeframe: string): number {
-  const map: Record<string, number> = {
-    '1min':  2,
-    '3min':  2,
-    '5min':  3,
-    '15min': 3,
-    '30min': 4,
-    '1hour': 4,
-    '2hour': 5,
-    '4hour': 6,
-    '1day':  7,
-  };
-  return map[timeframe] ?? 3;
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────

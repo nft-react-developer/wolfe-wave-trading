@@ -71,40 +71,49 @@ export function calcMACD(
 // ─── Fibonacci levels ────────────────────────────────────────────────────────
 
 export interface FibLevels {
-  fib0: number;     // 0%   = P2 (start)
+  fib0: number;     // 0%   = P3 (start — closest to P5 entry)
   fib236: number;   // 23.6%
   fib382: number;   // 38.2%
   fib500: number;   // 50%
   fib618: number;   // 61.8%
-  fib100: number;   // 100% = P3 (end)
+  fib100: number;   // 100% = P2 (end)
   fib1618: number;  // 161.8% extension
 }
 
 /**
- * Compute Fibonacci retracement levels from P2 to P3.
- * Alba Puerro: throw Fibonacci from P2 to P3
- *   - Bullish wave → P2 is the high, P3 is the low (draw top-down)
- *   - Bearish wave → P2 is the low, P3 is the high (draw bottom-up)
+ * Compute Fibonacci extension levels from P3 toward P2 and beyond.
+ * Alba Puerro: throw Fibonacci from P2 to P3, then use the retracement
+ * levels as price targets after P5 — meaning price travels back from P3
+ * toward P2 (and potentially past it).
+ *
+ * Direction of projection:
+ *   - Bullish wave → P3 is the low, P2 is the high → levels go UP from P3
+ *   - Bearish wave → P3 is the high, P2 is the low → levels go DOWN from P3
+ *
+ * fib0   = P3 (the 0% anchor, near P5 entry)
+ * fib100 = P2 (the 100% level, full retracement back to origin)
+ * fib1618 = 161.8% extension beyond P2
  */
 export function calcFibLevels(p2Price: number, p3Price: number, direction: 'bullish' | 'bearish'): FibLevels {
-  const range = Math.abs(p3Price - p2Price);
-  const isDown = direction === 'bullish'; // bullish: P2 high → P3 low
+  const range = Math.abs(p2Price - p3Price);
+
+  // For bullish: P3 is low, P2 is high → project upward from P3
+  // For bearish: P3 is high, P2 is low → project downward from P3
+  const isUp = direction === 'bullish';
 
   const level = (pct: number) =>
-    isDown
-      ? p2Price - range * pct          // downward fib from P2
-      : p2Price + range * pct;         // upward fib from P2
+    isUp
+      ? p3Price + range * pct   // upward from P3 toward P2 and beyond
+      : p3Price - range * pct;  // downward from P3 toward P2 and beyond
 
   return {
-    fib0:    p2Price,
+    fib0:    p3Price,
     fib236:  level(0.236),
     fib382:  level(0.382),
     fib500:  level(0.5),
     fib618:  level(0.618),
-    fib100:  p3Price,
-    fib1618: isDown
-      ? p2Price - range * 1.618
-      : p2Price + range * 1.618,
+    fib100:  p2Price,            // 100% = back to P2 by definition
+    fib1618: level(1.618),
   };
 }
 
