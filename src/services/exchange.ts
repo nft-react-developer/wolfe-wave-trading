@@ -1,6 +1,6 @@
 import axios, { type AxiosInstance, type AxiosError } from 'axios';
 import crypto from 'crypto';
-import type { Candle, ExchangeOrder, IExchange } from '../types';
+import type { Candle, ExchangeOrder, ExchangeStopOrder, IExchange } from '../types';
 import { logger } from '../utils/logger';
 
 // ─── CoinEx V2 kline period values ───────────────────────────────────────────
@@ -20,8 +20,6 @@ const TIMEFRAME_MAP: Record<string, string> = {
   '3day':  '3day',
   '1week': '1week',
 };
-
-// ─── Helper: extract useful info from Axios errors ───────────────────────────
 
 function formatAxiosError(err: unknown): object {
   if (axios.isAxiosError(err)) {
@@ -119,7 +117,7 @@ export class CoinExExchange implements IExchange {
     }
   }
 
-  // ─── Authenticated: Place order ──────────────────────────────────────────
+  // ─── Authenticated: Place regular order ──────────────────────────────────
 
   async placeOrder(params: {
     symbol:    string;
@@ -190,7 +188,157 @@ export class CoinExExchange implements IExchange {
     }
   }
 
-  // ─── Authenticated: Cancel order ─────────────────────────────────────────
+  // ─── Authenticated: Place stop order (SL nativo) ─────────────────────────
+  //
+  // POST /spot/stop-order
+  // Parámetros clave:
+  //   trigger_price  → precio que activa la orden
+  //   type           → 'market' o 'limit'
+  //   price          → precio límite (solo para type='limit')
+  //
+  // La orden NO congela balance hasta ser activada (comportamiento CoinEx).
+  // Para un SL de long usamos: side='sell', type='market', trigger_price=slPrice
+  // Para un SL de short usamos: side='buy',  type='market', trigger_price=slPrice
+
+  async placeStopOrder(params: {
+    symbol:       string;
+    side:         'buy' | 'sell';
+    type:         'market' | 'limit';
+    quantity:     number;
+    triggerPrice: number;
+    price?:       number;
+  }): Promise<ExchangeStopOrder> {
+    const requestPath = '/v2/spot/stop-order';
+
+    const bodyObj: Record<string, unknown> = {
+      market:        params.symbol,
+      market_type:   'SPOT',
+      side:          params.side,
+      type:          params.type,
+      amount:        params.quantity.toFixed(8),
+      trigger_price: params.triggerPrice.toFixed(8),
+    };
+
+    // Para stop-limit necesitamos precio límite ligeramente peor que el trigger
+    // para garantizar ejecución. Si no se pasa price, lo calculamos aquí.
+    if (params.type === 'limit') {
+      const slippage = 0.005; // 0.5% de margen adicional
+      const limitPrice = params.price ?? (
+        params.side === 'sell'
+          ? params.triggerPrice * (1 - slippage)   // long SL: vender un poco más abajo
+          : params.triggerPrice * (1 + slippage)   // short SL: comprar un poco más arriba
+      );
+      bodyObj.price = limitPrice.toFixed(8);
+    }
+
+    const bodyStr = JSON.stringify(bodyObj);
+
+    logger.info('CoinEx placeStopOrder payload', {
+      symbol:       params.symbol,
+      side:         params.side,
+      type:         params.type,
+      quantity:     params.quantity.toFixed(8),
+      triggerPrice: params.triggerPrice.toFixed(8),
+      price:        bodyObj.price,
+    });
+
+    try {
+      const resp = await this.client.post('/spot/stop-order', bodyStr, {
+        headers: this.authHeaders('POST', requestPath, bodyStr),
+      });
+
+      this.assertOk(resp.data, 'placeStopOrder');
+
+      const d = resp.data.data;
+
+      return {
+        stopId:       String(d.stop_id),
+        symbol:       params.symbol,
+        side:         params.side,
+        type:         params.type,
+        quantity:     params.quantity,
+        triggerPrice: params.triggerPrice,
+        price:        params.price,
+        status:       'open',
+      };
+    } catch (err) {
+      logger.error('CoinEx placeStopOrder error', formatAxiosError(err));
+      throw err;
+    }
+  }
+
+  // ─── Authenticated: Cancel stop order ────────────────────────────────────
+
+  async cancelStopOrder(symbol: string, stopId: string): Promise<void> {
+    const requestPath = '/v2/spot/cancel-stop-order';
+    const bodyStr = JSON.stringify({
+      market:      symbol,
+      market_type: 'SPOT',
+      stop_id:     Number(stopId),
+    });
+
+    try {
+      const resp = await this.client.post('/spot/cancel-stop-order', bodyStr, {
+        headers: this.authHeaders('POST', requestPath, bodyStr),
+      });
+      this.assertOk(resp.data, 'cancelStopOrder');
+    } catch (err) {
+      logger.error('CoinEx cancelStopOrder error', formatAxiosError(err));
+      throw err;
+    }
+  }
+
+  // ─── Authenticated: Get stop order status ────────────────────────────────
+  //
+  // CoinEx no tiene un endpoint directo "get single stop order by id".
+  // Usamos la lista de stop orders pendientes y buscamos por stop_id.
+  // Si no está en pendientes, está triggered o cancelled.
+
+  async getStopOrder(symbol: string, stopId: string): Promise<ExchangeStopOrder> {
+    const requestPath = `/v2/spot/pending-stop-order?market=${symbol}&market_type=SPOT&page=1&limit=100`;
+
+    try {
+      const resp = await this.client.get('/spot/pending-stop-order', {
+        params:  { market: symbol, market_type: 'SPOT', page: 1, limit: 100 },
+        headers: this.authHeaders('GET', requestPath),
+      });
+
+      this.assertOk(resp.data, 'getStopOrder (pending)');
+
+      const items: Array<Record<string, unknown>> = resp.data.data?.items ?? [];
+      const found = items.find((o) => String(o.stop_id) === stopId);
+
+      if (found) {
+        return {
+          stopId:       String(found.stop_id),
+          symbol,
+          side:         found.side as 'buy' | 'sell',
+          type:         found.type as 'market' | 'limit',
+          quantity:     Number(found.amount),
+          triggerPrice: Number(found.trigger_price),
+          price:        found.price ? Number(found.price) : undefined,
+          status:       'open',
+        };
+      }
+
+      // No está en pendientes → fue activada (triggered) o cancelada.
+      // Consideramos 'triggered' como estado terminal (equivale a filled para nosotros).
+      return {
+        stopId,
+        symbol,
+        side:         'sell',
+        type:         'market',
+        quantity:     0,
+        triggerPrice: 0,
+        status:       'triggered',
+      };
+    } catch (err) {
+      logger.error('CoinEx getStopOrder error', formatAxiosError(err));
+      throw err;
+    }
+  }
+
+  // ─── Authenticated: Cancel regular order ─────────────────────────────────
 
   async cancelOrder(symbol: string, orderId: string): Promise<void> {
     const requestPath = '/v2/spot/cancel-order';
@@ -211,7 +359,7 @@ export class CoinExExchange implements IExchange {
     }
   }
 
-  // ─── Authenticated: Get order status ────────────────────────────────────
+  // ─── Authenticated: Get regular order status ─────────────────────────────
 
   async getOrder(symbol: string, orderId: string): Promise<ExchangeOrder> {
     const qs          = `market=${symbol}&market_type=SPOT&order_id=${orderId}`;
@@ -269,8 +417,7 @@ export class CoinExExchange implements IExchange {
 
   // ─── Helpers ─────────────────────────────────────────────────────────────
 
-  private mapOrderStatus(d: { status?: string; unfilled_amount?: string; amount?: string }):
-    'open' | 'filled' | 'cancelled' {
+  private mapOrderStatus(d: { status?: string }): 'open' | 'filled' | 'cancelled' {
     if (d.status === 'done')   return 'filled';
     if (d.status === 'cancel') return 'cancelled';
     return 'open';
@@ -289,7 +436,8 @@ export class CoinExExchange implements IExchange {
 
 export class PaperExchange implements IExchange {
   private _balance: Record<string, number>;
-  private orders   = new Map<string, ExchangeOrder>();
+  private orders     = new Map<string, ExchangeOrder>();
+  private stopOrders = new Map<string, ExchangeStopOrder>();
   private nextId   = 1;
 
   constructor(initialCapital: number) {
@@ -350,6 +498,42 @@ export class PaperExchange implements IExchange {
       }
     }
 
+    return order;
+  }
+
+  // En paper mode las stop orders son solo registros — el bot las monitorea
+  // en evaluateTrade() comparando currentPrice con trade.stopLoss.
+  async placeStopOrder(params: {
+    symbol:       string;
+    side:         'buy' | 'sell';
+    type:         'market' | 'limit';
+    quantity:     number;
+    triggerPrice: number;
+    price?:       number;
+  }): Promise<ExchangeStopOrder> {
+    const id = String(this.nextId++);
+    const stopOrder: ExchangeStopOrder = {
+      stopId:       id,
+      symbol:       params.symbol,
+      side:         params.side,
+      type:         params.type,
+      quantity:     params.quantity,
+      triggerPrice: params.triggerPrice,
+      price:        params.price,
+      status:       'open',
+    };
+    this.stopOrders.set(id, stopOrder);
+    return stopOrder;
+  }
+
+  async cancelStopOrder(_symbol: string, stopId: string): Promise<void> {
+    const order = this.stopOrders.get(stopId);
+    if (order) order.status = 'cancelled';
+  }
+
+  async getStopOrder(_symbol: string, stopId: string): Promise<ExchangeStopOrder> {
+    const order = this.stopOrders.get(stopId);
+    if (!order) throw new Error(`Paper stop order ${stopId} not found`);
     return order;
   }
 

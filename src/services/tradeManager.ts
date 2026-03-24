@@ -124,7 +124,6 @@ export class RiskGuard {
   }
 }
 
-
 // ─── Position sizing ──────────────────────────────────────────────────────────
 
 export function calcPositionSize(
@@ -199,63 +198,71 @@ export class TradeService {
 
     let entryOrderId: string | undefined;
     let slOrderId:    string | undefined;
-    let filledQuantity: number = quantity; // default to intended quantity, will adjust after fill if needed
-    let adjustedSL: number = wave.stopLoss; // may adjust based on actual fill price to maintain same buffer
-    try {
+    let filledQuantity = quantity;
+    let adjustedSL     = wave.stopLoss;
 
-    logger.info('Placing entry order', {
-        symbol:    wave?.symbol,
+    try {
+      logger.info('Placing entry order', {
+        symbol:    wave.symbol,
         side:      orderSide,
         type:      'market',
-        quantity:  quantity?.toFixed(8),
-        usdAmount: usdAmount?.toFixed(2),
-        price:     wave?.entryPrice,
-        sl:        wave?.stopLoss,
+        quantity:  quantity.toFixed(8),
+        usdAmount: usdAmount.toFixed(2),
+        price:     wave.entryPrice,
+        sl:        wave.stopLoss,
       });
 
-    const entryOrder = await this.exchange.placeOrder({
-      symbol:   wave.symbol,
-      side:     orderSide,
-      type:     'market',
-      quantity,
-      price:    wave.entryPrice,
-    });
-    entryOrderId = entryOrder.orderId;
-
-    // Usar la cantidad real ejecutada para el SL
-    // evita error "balance not enough" por diferencia de fees/slippage
-    filledQuantity = entryOrder.quantity > 0 ? entryOrder.quantity : quantity;
-
-    // Usar el precio real de ejecución para el SL
-    const filledPrice = entryOrder.filledPrice ?? wave.entryPrice;
-
-   // Recalcular SL basado en el precio real del fill para compensar slippage
-    const slDistance     = Math.abs(wave.entryPrice - wave.stopLoss);
-    adjustedSL     = wave.direction === 'bullish'
-      ? filledPrice - slDistance
-      : filledPrice + slDistance;
-
-    logger.info('SL ajustado al precio real del fill', {
-      symbol:        wave.symbol,
-      p5Price:       wave.entryPrice,
-      filledPrice,
-      slOriginal:    wave.stopLoss,
-      slAdjustado:   adjustedSL,
-      distancia:     slDistance.toFixed(8),
-    });
-
-    if (this.mode === 'real') {
-      const slOrder = await this.exchange.placeOrder({
+      const entryOrder = await this.exchange.placeOrder({
         symbol:   wave.symbol,
-        side:     orderSide === 'buy' ? 'sell' : 'buy',
-        type:     'limit',
-        quantity: filledQuantity,
-        price:    adjustedSL,
+        side:     orderSide,
+        type:     'market',
+        quantity,
+        price:    wave.entryPrice,
       });
-        slOrderId = slOrder.orderId;
+      entryOrderId = entryOrder.orderId;
+
+      // Usar cantidad real ejecutada para el SL
+      filledQuantity = entryOrder.quantity > 0 ? entryOrder.quantity : quantity;
+
+      // Recalcular SL basado en el precio real del fill
+      const filledPrice = entryOrder.filledPrice ?? wave.entryPrice;
+      const slDistance  = Math.abs(wave.entryPrice - wave.stopLoss);
+      adjustedSL = wave.direction === 'bullish'
+        ? filledPrice - slDistance
+        : filledPrice + slDistance;
+
+      logger.info('SL ajustado al precio real del fill', {
+        symbol:      wave.symbol,
+        p5Price:     wave.entryPrice,
+        filledPrice,
+        slOriginal:  wave.stopLoss,
+        slAjustado:  adjustedSL,
+        distancia:   slDistance.toFixed(8),
+      });
+
+      // ── Colocar Stop Order nativa en el exchange (modo real) ──────────────
+      // Usamos type='market' para garantizar ejecución al ser activada.
+      // trigger_price = adjustedSL → solo se activa cuando el precio
+      // baja (long) o sube (short) hasta ese nivel.
+      if (this.mode === 'real') {
+        const slStopOrder = await this.exchange.placeStopOrder({
+          symbol:       wave.symbol,
+          side:         orderSide === 'buy' ? 'sell' : 'buy',  // sentido contrario
+          type:         'market',
+          quantity:     filledQuantity,
+          triggerPrice: adjustedSL,
+        });
+        slOrderId = slStopOrder.stopId;
+
+        logger.info('Stop order SL colocada en exchange', {
+          symbol:       wave.symbol,
+          stopId:       slOrderId,
+          triggerPrice: adjustedSL.toFixed(8),
+          side:         slStopOrder.side,
+        });
       }
     } catch (err) {
-      logger.error('Failed to place entry order', err);
+      logger.error('Failed to place entry or SL order', err);
       return null;
     }
 
@@ -267,12 +274,12 @@ export class TradeService {
       wolfeWaveId:  waveId,
       symbol:       wave.symbol,
       timeframe:    wave.timeframe,
-      side,                          // 'long' | 'short'  ✓
-      mode:         this.mode,       // 'paper' | 'real'  ✓
-      status:       'open',          // enum literal       ✓
+      side,
+      mode:         this.mode,
+      status:       'open',
       entryPrice:   wave.entryPrice.toFixed(8),
       entryTime:    now,
-      quantity:     filledQuantity.toFixed(8), 
+      quantity:     filledQuantity.toFixed(8),
       usdAmount:    usdAmount.toFixed(2),
       stopLoss:     adjustedSL.toFixed(8),
       target1:      wave.target1.toFixed(8),
@@ -295,7 +302,7 @@ export class TradeService {
       side,
       mode:   this.mode,
       entry:  wave.entryPrice,
-      sl:     wave.stopLoss,
+      sl:     adjustedSL,
       tp1:    wave.target1,
       tp2:    wave.target2,
     });
@@ -312,7 +319,7 @@ export class TradeService {
       entryTime:    now,
       quantity,
       usdAmount,
-      stopLoss:     wave.stopLoss,
+      stopLoss:     adjustedSL,
       target1:      wave.target1,
       target2:      wave.target2,
       target3:      wave.target3,
@@ -365,38 +372,43 @@ export class TradeService {
     const qty    = Number(trade.quantity);
     const entry  = Number(trade.entryPrice);
 
-    // ── Check SL order ────────────────────────────────────────────────────────
+    // ── Verificar stop order (SL nativo) ─────────────────────────────────────
     if (trade.slOrderId) {
-      const slOrder = await this.exchange.getOrder(trade.symbol, trade.slOrderId);
+      try {
+        const slStop = await this.exchange.getStopOrder(trade.symbol, trade.slOrderId);
 
-      if (slOrder.status === 'filled') {
-        const fillPrice = slOrder.filledPrice ?? Number(trade.stopLoss);
-        const remaining = qty
-          - Number(trade.closedQty1)
-          - Number(trade.closedQty2)
-          - Number(trade.closedQty3)
-          - Number(trade.closedQty4);
-        const pnl = this.calcPnl(entry, fillPrice, remaining, isLong);
+        if (slStop.status === 'triggered') {
+          // La stop order se activó mientras el bot estaba offline.
+          // Asumimos ejecución al precio de trigger como aproximación.
+          const fillPrice = slStop.triggerPrice > 0 ? slStop.triggerPrice : Number(trade.stopLoss);
+          const remaining = qty
+            - Number(trade.closedQty1)
+            - Number(trade.closedQty2)
+            - Number(trade.closedQty3)
+            - Number(trade.closedQty4);
+          const pnl = this.calcPnl(entry, fillPrice, remaining, isLong);
 
-        await this.closeTrade(trade.id!, fillPrice, 'sl', pnl);
-        await db.update(wolfeWaves)
-          .set({ hitStopLoss: true })
-          .where(eq(wolfeWaves.id, trade.wolfeWaveId));
+          await this.closeTrade(trade.id!, fillPrice, 'sl', pnl);
+          await db.update(wolfeWaves)
+            .set({ hitStopLoss: true })
+            .where(eq(wolfeWaves.id, trade.wolfeWaveId));
 
-        logger.info(`Reconciliation: trade #${trade.id} SL was filled at ${fillPrice} — closed`);
-        return; // no need to check TPs
-      }
+          logger.info(`Reconciliation: trade #${trade.id} stop triggered at ~${fillPrice} — closed`);
+          return;
+        }
 
-      if (slOrder.status === 'cancelled') {
-        // SL was cancelled externally — log and cancel our DB record too
-        logger.warn(`Reconciliation: trade #${trade.id} SL order was cancelled externally`);
-        await db.update(trades)
-          .set({ slOrderId: null })
-          .where(eq(trades.id, trade.id!));
+        if (slStop.status === 'cancelled') {
+          logger.warn(`Reconciliation: trade #${trade.id} stop order was cancelled externally`);
+          await db.update(trades)
+            .set({ slOrderId: null })
+            .where(eq(trades.id, trade.id!));
+        }
+      } catch (err) {
+        logger.warn(`Reconciliation: could not check stop order for trade #${trade.id}`, err);
       }
     }
 
-    // ── Check TP1 order ───────────────────────────────────────────────────────
+    // ── Verificar TP1 ─────────────────────────────────────────────────────────
     if (trade.tp1OrderId && Number(trade.closedQty1) === 0) {
       const tp1Order = await this.exchange.getOrder(trade.symbol, trade.tp1OrderId);
 
@@ -417,7 +429,7 @@ export class TradeService {
       }
     }
 
-    // ── Check TP2 order ───────────────────────────────────────────────────────
+    // ── Verificar TP2 ─────────────────────────────────────────────────────────
     if (trade.tp2OrderId && Number(trade.closedQty2) === 0) {
       const tp2Order = await this.exchange.getOrder(trade.symbol, trade.tp2OrderId);
 
@@ -477,9 +489,9 @@ export class TradeService {
   // ─── Evaluate a single trade ────────────────────────────────────────────────
 
   private async evaluateTrade(
-    trade: typeof trades.$inferSelect,
+    trade:        typeof trades.$inferSelect,
     currentPrice: number,
-    candles?: import('../types').Candle[],
+    candles?:     import('../types').Candle[],
   ): Promise<void> {
     const db = await getDb();
 
@@ -498,29 +510,32 @@ export class TradeService {
 
     const isLong = trade.side === 'long';
 
-    // Al principio de evaluateTrade, en modo real verificar si el SL ya fue ejecutado en el exchange
+    // ── En modo real: verificar si la stop order fue activada en el exchange ──
+    // Esto cubre el caso en que el exchange ejecutó el SL pero el bot no lo
+    // detectó todavía (latencia, reinicio, etc.)
     if (this.mode === 'real' && trade.slOrderId) {
       try {
-        const slOrder = await this.exchange.getOrder(trade.symbol, trade.slOrderId);
-        if (slOrder.status === 'filled') {
-          const fillPrice = slOrder.filledPrice ?? Number(trade.stopLoss);
+        const slStop = await this.exchange.getStopOrder(trade.symbol, trade.slOrderId);
+        if (slStop.status === 'triggered') {
+          const fillPrice = slStop.triggerPrice > 0 ? slStop.triggerPrice : sl;
           const remaining = qty - closedQty1 - closedQty2 - closedQty3 - closedQty4;
           const pnl = this.calcPnl(entry, fillPrice, remaining, isLong);
           await this.closeTrade(trade.id!, fillPrice, 'sl', pnl);
           await db.update(wolfeWaves)
             .set({ hitStopLoss: true })
             .where(eq(wolfeWaves.id, trade.wolfeWaveId));
-          logger.info('SL order filled on exchange — trade closed', {
+          logger.info('Stop order triggered on exchange — trade closed', {
             id: trade.id, symbol: trade.symbol, fillPrice,
           });
           return;
         }
       } catch (err) {
-        logger.warn(`Could not check SL order status for trade #${trade.id}`, err);
+        logger.warn(`Could not check stop order status for trade #${trade.id}`, err);
       }
     }
 
-    // ── Stop Loss ───────────────────────────────────────────────────────────
+    // ── Stop Loss (monitoreo por software — doble seguridad en paper mode,
+    //    y fallback en real mode si no hay stop order registrada) ────────────
     const slHit = isLong ? currentPrice <= sl : currentPrice >= sl;
     if (slHit) {
       const remaining = qty - closedQty1 - closedQty2 - closedQty3 - closedQty4;
@@ -532,7 +547,7 @@ export class TradeService {
       return;
     }
 
-    // ── Target 1: close 50%, move SL to breakeven ───────────────────────────
+    // ── Target 1: cerrar 50%, mover SL a breakeven ──────────────────────────
     const tp1Hit = closedQty1 === 0 && (isLong ? currentPrice >= tp1 : currentPrice <= tp1);
     if (tp1Hit) {
       const partialQty = qty * 0.5;
@@ -551,9 +566,17 @@ export class TradeService {
         }
       }
 
+      // Mover SL a breakeven: cancelar la stop order actual y colocar nueva
+      const remaining = qty - partialQty;
+      const newSlPrice = entry; // breakeven
+
+      if (this.mode === 'real' && trade.slOrderId) {
+        await this.replaceStopOrder(trade, remaining, newSlPrice, isLong);
+      }
+
       await db.update(trades).set({
         closedQty1: partialQty.toFixed(8),
-        stopLoss:   entry.toFixed(8), // move SL to breakeven
+        stopLoss:   newSlPrice.toFixed(8),
       }).where(eq(trades.id, trade.id!));
 
       await db.update(wolfeWaves)
@@ -561,15 +584,15 @@ export class TradeService {
         .where(eq(wolfeWaves.id, trade.wolfeWaveId));
 
       logger.info('TP1 hit — partial close 50%, SL moved to BE', {
-        id: trade.id, symbol: trade.symbol, price: currentPrice,
+        id: trade.id, symbol: trade.symbol, price: currentPrice, newSL: newSlPrice,
       });
       return;
     }
 
-    // ── Trailing Stop (active after TP1, i.e. closedQty1 > 0) ───────────────
+    // ── Trailing Stop (activo después de TP1) ────────────────────────────────
     if (closedQty1 > 0 && config.trailingStopMethod !== undefined) {
       await this.applyTrailingStop(trade, currentPrice, sl, isLong, candles);
-      // Re-read stopLoss from DB in case it was updated, to avoid stale sl below
+      // Re-leer SL actualizado
       const [refreshed] = await db.select({ stopLoss: trades.stopLoss })
         .from(trades).where(eq(trades.id, trade.id!));
       if (refreshed) {
@@ -616,9 +639,13 @@ export class TradeService {
           .where(eq(wolfeWaves.id, trade.wolfeWaveId));
         logger.info('TP2 hit (fat M/W) — partial close', { id: trade.id, price: currentPrice });
       } else {
-        // Standard wave: close everything at TP2
         const remaining = qty - closedQty1;
         const pnl = this.calcPnl(entry, currentPrice, remaining, isLong);
+        // Cancelar stop order ya que vamos a cerrar la posición
+        if (this.mode === 'real' && trade.slOrderId) {
+          try { await this.exchange.cancelStopOrder(trade.symbol, trade.slOrderId); }
+          catch (err) { logger.warn('Could not cancel stop order at TP2 close', err); }
+        }
         await this.closeTrade(trade.id!, currentPrice, 'tp2', pnl);
         await db.update(wolfeWaves)
           .set({ reachedTarget2: true })
@@ -658,6 +685,10 @@ export class TradeService {
         } else {
           const remaining = qty - closedQty1 - closedQty2;
           const pnl = this.calcPnl(entry, currentPrice, remaining, isLong);
+          if (this.mode === 'real' && trade.slOrderId) {
+            try { await this.exchange.cancelStopOrder(trade.symbol, trade.slOrderId); }
+            catch (err) { logger.warn('Could not cancel stop order at TP3 close', err); }
+          }
           await this.closeTrade(trade.id!, currentPrice, 'tp3', pnl);
           await db.update(wolfeWaves)
             .set({ reachedTarget3: true })
@@ -675,17 +706,69 @@ export class TradeService {
       if (tp4Hit) {
         const remaining = qty - closedQty1 - closedQty2 - closedQty3;
         const pnl = this.calcPnl(entry, currentPrice, remaining, isLong);
+        if (this.mode === 'real' && trade.slOrderId) {
+          try { await this.exchange.cancelStopOrder(trade.symbol, trade.slOrderId); }
+          catch (err) { logger.warn('Could not cancel stop order at TP4 close', err); }
+        }
         await this.closeTrade(trade.id!, currentPrice, 'tp4', pnl);
         logger.info('TP4 (161.8%) hit!', { id: trade.id, price: currentPrice });
       }
     }
   }
 
-  // ─── Trailing Stop ────────────────────────────────────────────────────────
+  // ─── Reemplazar stop order en el exchange ─────────────────────────────────
   //
-  // Called once per price tick (WS mode) or per scan cycle (polling mode)
-  // after TP1 has been hit. Calculates the new trailing SL and updates the
-  // DB + exchange order if the improvement exceeds the minimum move threshold.
+  // Se usa al mover SL a breakeven (después de TP1) y al actualizar trailing stop.
+  // Cancela la stop order existente y coloca una nueva con el nuevo precio.
+
+  private async replaceStopOrder(
+    trade:       typeof trades.$inferSelect,
+    quantity:    number,
+    newSlPrice:  number,
+    isLong:      boolean,
+  ): Promise<string | undefined> {
+    const db = await getDb();
+
+    // Cancelar stop order actual
+    if (trade.slOrderId) {
+      try {
+        await this.exchange.cancelStopOrder(trade.symbol, trade.slOrderId);
+        logger.debug('Stop order cancelada para reemplazo', {
+          id: trade.id, oldStopId: trade.slOrderId,
+        });
+      } catch (err) {
+        logger.warn(`No se pudo cancelar stop order ${trade.slOrderId}`, err);
+      }
+    }
+
+    // Colocar nueva stop order
+    try {
+      const newStop = await this.exchange.placeStopOrder({
+        symbol:       trade.symbol,
+        side:         isLong ? 'sell' : 'buy',
+        type:         'market',
+        quantity,
+        triggerPrice: newSlPrice,
+      });
+
+      await db.update(trades)
+        .set({ slOrderId: newStop.stopId })
+        .where(eq(trades.id, trade.id!));
+
+      logger.info('Stop order reemplazada en exchange', {
+        id:          trade.id,
+        newStopId:   newStop.stopId,
+        triggerPrice: newSlPrice.toFixed(8),
+      });
+
+      return newStop.stopId;
+    } catch (err) {
+      logger.error('Failed to place replacement stop order', err);
+      return undefined;
+    }
+  }
+
+  // ─── Trailing Stop ────────────────────────────────────────────────────────
 
   private async applyTrailingStop(
     trade:        typeof trades.$inferSelect,
@@ -708,49 +791,29 @@ export class TradeService {
 
     const db = await getDb();
 
-    // Update DB
+    // Actualizar DB primero
     await db.update(trades)
       .set({ stopLoss: newSl.toFixed(8) })
       .where(eq(trades.id, trade.id!));
 
     logger.debug('Trailing stop updated', {
-      id:       trade.id,
-      symbol:   trade.symbol,
-      oldSl:    currentSl.toFixed(8),
-      newSl:    newSl.toFixed(8),
-      method:   config.trailingStopMethod,
+      id:     trade.id,
+      symbol: trade.symbol,
+      oldSl:  currentSl.toFixed(8),
+      newSl:  newSl.toFixed(8),
+      method: config.trailingStopMethod,
     });
 
-    // Update exchange order in real mode: cancel old SL, place new one
-    if (this.mode === 'real' && trade.slOrderId) {
-      try {
-        await this.exchange.cancelOrder(trade.symbol, trade.slOrderId);
+    // Reemplazar stop order en el exchange (real mode)
+    if (this.mode === 'real') {
+      const remaining =
+        Number(trade.quantity)
+        - Number(trade.closedQty1)
+        - Number(trade.closedQty2)
+        - Number(trade.closedQty3)
+        - Number(trade.closedQty4);
 
-        const remaining =
-          Number(trade.quantity)
-          - Number(trade.closedQty1)
-          - Number(trade.closedQty2)
-          - Number(trade.closedQty3)
-          - Number(trade.closedQty4);
-
-        const newSlOrder = await this.exchange.placeOrder({
-          symbol:   trade.symbol,
-          side:     isLong ? 'sell' : 'buy',
-          type:     'limit',
-          quantity: remaining,
-          price:    newSl,
-        });
-
-        await db.update(trades)
-          .set({ slOrderId: newSlOrder.orderId })
-          .where(eq(trades.id, trade.id!));
-
-        logger.info('Trailing stop order replaced on exchange', {
-          id: trade.id, newSl: newSl.toFixed(8), orderId: newSlOrder.orderId,
-        });
-      } catch (err) {
-        logger.error('Failed to replace trailing SL order on exchange', err);
-      }
+      await this.replaceStopOrder(trade, remaining, newSl, isLong);
     }
   }
 
@@ -836,12 +899,12 @@ export class TradeService {
     const pnlPct    = usdAmount > 0 ? (pnl / usdAmount) * 100 : 0;
 
     await db.update(trades).set({
-      status:     'closed',
-      exitPrice:  exitPrice.toFixed(8),
-      exitTime:   Date.now(),
+      status:      'closed',
+      exitPrice:   exitPrice.toFixed(8),
+      exitTime:    Date.now(),
       closeReason: reason,
-      pnl:        pnl.toFixed(2),
-      pnlPct:     pnlPct.toFixed(4),
+      pnl:         pnl.toFixed(2),
+      pnlPct:      pnlPct.toFixed(4),
     }).where(eq(trades.id, tradeId));
 
     logger.info('Trade closed', {

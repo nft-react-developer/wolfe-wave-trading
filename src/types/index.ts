@@ -19,17 +19,6 @@ export interface WavePoint {
   timestamp: number;
 }
 
-/**
- * Wolfe Wave structure (5 points, Alba Puerro methodology)
- *
- * Bearish (shape "W") — short signal at point 5:
- *   P1 = prior low  | P2 = high (highest) | P3 = next low
- *   P4 = next high  | P5 = last low (< P3)
- *
- * Bullish (shape "M") — long signal at point 5:
- *   P2 = highest peak | P1 = low before P2 | P3 = low after P2
- *   P4 = high after P3 (> P1 ideally) | P5 = new low (< P3)
- */
 export interface WolfeWave {
   id?: number;
   symbol: string;
@@ -41,25 +30,22 @@ export interface WolfeWave {
   p4: WavePoint;
   p5: WavePoint;
 
-  // Classification
-  isPerfect: boolean;        // line 3-4 inside channel 1-2, P5 > P3 (bearish) or P5 < P3 (bullish)
-  shape: 'perfect' | 'fat_mw' | 'long_neck' | 'imperfect'; // Alba's shape taxonomy
+  isPerfect: boolean;
+  shape: 'perfect' | 'fat_mw' | 'long_neck' | 'imperfect';
   isDoubleWolfe: boolean;
 
-  // Key levels (computed)
-  entryPrice: number;        // P5 area (enter immediately on identification)
-  stopLoss: number;          // just beyond P5
-  target1: number;           // 23.6% Fibonacci P2→P3
-  target2: number;           // 61.8% Fibonacci P2→P3
-  target3?: number;          // 100% Fibonacci (only fat M/W shapes)
-  target4?: number;          // 161.8% Fibonacci extension (fat M/W)
-  line14Price?: number;      // price on line 1-4 at entry time (Bill Wolfe objective)
+  entryPrice: number;
+  stopLoss: number;
+  target1: number;
+  target2: number;
+  target3?: number;
+  target4?: number;
+  line14Price?: number;
 
-  // EMA50 reference at detection time
   ema50: number;
   macdHistogram?: number;
 
-  detectedAt: number;        // unix ms
+  detectedAt: number;
 }
 
 // ─── Trade ────────────────────────────────────────────────────────────────────
@@ -80,8 +66,8 @@ export interface Trade {
 
   entryPrice: number;
   entryTime: number;
-  quantity: number;          // base asset qty
-  usdAmount: number;         // USD value of position
+  quantity: number;
+  usdAmount: number;
 
   stopLoss: number;
   target1: number;
@@ -89,8 +75,7 @@ export interface Trade {
   target3?: number;
   target4?: number;
 
-  // Partial close tracking
-  closedQty1: number;        // qty closed at TP1 (50% default)
+  closedQty1: number;
   closedQty2: number;
   closedQty3: number;
   closedQty4: number;
@@ -98,12 +83,11 @@ export interface Trade {
   exitPrice?: number;
   exitTime?: number;
   closeReason?: CloseReason;
-  pnl?: number;              // realized PnL in USD
+  pnl?: number;
   pnlPct?: number;
 
-  // Exchange order IDs (real mode)
   entryOrderId?: string;
-  slOrderId?: string;
+  slOrderId?: string;      // stop_id (string) de la stop order nativa
   tp1OrderId?: string;
   tp2OrderId?: string;
 
@@ -170,15 +154,25 @@ export interface ExchangeOrder {
   filledAt?: number;
 }
 
+/**
+ * Stop order (trigger order) — queda pendiente hasta que el precio
+ * de mercado alcanza trigger_price, momento en que se activa la orden
+ * subyacente (market o limit).
+ */
+export interface ExchangeStopOrder {
+  stopId: string;
+  symbol: string;
+  side: 'buy' | 'sell';
+  type: 'market' | 'limit';
+  quantity: number;
+  triggerPrice: number;
+  price?: number;          // solo para type='limit'
+  status: 'open' | 'triggered' | 'cancelled';
+}
+
 // ─── Price Feed ──────────────────────────────────────────────────────────────
 
-/**
- * Abstraction over how current prices are delivered to the trade monitor.
- * - PollingPriceFeed: prices come from the candle scan cycle (default)
- * - WebSocketPriceFeed: prices stream in real-time from CoinEx WS
- */
 export interface IPriceFeed {
-  /** Start delivering prices. onPrice is called whenever a new price arrives. */
   start(symbols: string[], onPrice: (symbol: string, price: number) => void): void;
   stop(): void;
 }
@@ -196,6 +190,18 @@ export interface IExchange {
   cancelOrder(symbol: string, orderId: string): Promise<void>;
   getOrder(symbol: string, orderId: string): Promise<ExchangeOrder>;
   getBalance(): Promise<Record<string, number>>;
+
+  // ── Stop orders (SL nativo del exchange) ──────────────────────────────────
+  placeStopOrder(params: {
+    symbol: string;
+    side: 'buy' | 'sell';
+    type: 'market' | 'limit';
+    quantity: number;
+    triggerPrice: number;
+    price?: number;        // necesario cuando type='limit'
+  }): Promise<ExchangeStopOrder>;
+  cancelStopOrder(symbol: string, stopId: string): Promise<void>;
+  getStopOrder(symbol: string, stopId: string): Promise<ExchangeStopOrder>;
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -212,16 +218,14 @@ export interface AppConfig {
   emaPeriod: number;
   apiPort: number;
   dailyReportCron: string;
-  // ── Risk management ──────────────────────────────────────────────────────
-  maxOpenTradesTotal: number;     // 0 = unlimited
-  maxOpenTradesPerSymbol: number; // 0 = unlimited
-  maxDailyLossPct: number;        // e.g. 0.05 = pause bot when daily loss >= 5% of capital
+  maxOpenTradesTotal: number;
+  maxOpenTradesPerSymbol: number;
+  maxDailyLossPct: number;
   priceFeed: 'polling' | 'websocket';
-  // ── Trailing stop ────────────────────────────────────────────────────────
-  trailingStopMethod:   'structure' | 'percentage' | 'atr'; // default: structure
-  trailingStopLookback: number;   // candles for structure/ATR (default: 5)
-  trailingStopPct:      number;   // only used when method=percentage (default: 0.015 = 1.5%)
-  trailingStopMinMove:  number;   // min price change to update SL on exchange (default: 0.003 = 0.3%)
-  symbolUpdateCron: string;       // when to update the list of scanned symbols daily (default: '5 0 * * *' = 00:05 UTC)
-  updateSymbolsOnStartup: boolean; // if true, updates symbols at startup based on latest volume snapshot (recommended for production)
+  trailingStopMethod:   'structure' | 'percentage' | 'atr';
+  trailingStopLookback: number;
+  trailingStopPct:      number;
+  trailingStopMinMove:  number;
+  symbolUpdateCron: string;
+  updateSymbolsOnStartup: boolean;
 }
