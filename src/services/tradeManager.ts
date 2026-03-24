@@ -12,7 +12,7 @@ const { trades, wolfeWaves } = schema;
 
 export class RiskGuard {
   private paused = false;
-  private pausedOnDate = ''; // UTC date string when pause was triggered e.g. '2026-03-13'
+  private pausedOnDate = '';
 
   constructor(private mode: TradeMode) {}
 
@@ -131,7 +131,7 @@ export function calcPositionSize(
   stopLoss: number,
   availableCapital: number,
 ): { usdAmount: number; quantity: number } {
-  const riskPct    = 0.01; // risk 1% of capital per trade
+  const riskPct    = 0.01;
   const riskAmount = Math.min(availableCapital * riskPct, config.maxTradeAmount);
 
   const priceDiff = Math.abs(entryPrice - stopLoss);
@@ -140,11 +140,9 @@ export function calcPositionSize(
   const quantity  = riskAmount / priceDiff;
   const usdAmount = quantity * entryPrice;
 
-  // Hard cap
   const cappedUsd = Math.min(usdAmount, config.maxTradeAmount);
   const cappedQty = cappedUsd / entryPrice;
 
-  // Mínimo de orden aceptado por CoinEx (30 USDT)
   const MIN_ORDER_USDT = 30;
   if (cappedUsd < MIN_ORDER_USDT) {
     if (availableCapital < MIN_ORDER_USDT) return { usdAmount: 0, quantity: 0 };
@@ -333,11 +331,7 @@ export class TradeService {
     };
   }
 
-  // ─── Reconcile open trades against the exchange on startup (real mode only) ──
-  //
-  // On restart we don't know if any SL/TP orders were filled while the bot
-  // was down. This method queries the exchange for every order ID stored in
-  // the DB and updates trade state accordingly before the scan loop begins.
+  // ─── Reconcile open trades (real mode only) ────────────────────────────────
 
   async reconcileOpenTrades(): Promise<void> {
     if (this.mode !== 'real') return;
@@ -418,7 +412,7 @@ export class TradeService {
 
         await db.update(trades).set({
           closedQty1: partialQty.toFixed(8),
-          stopLoss:   entry.toFixed(8),         // move SL to breakeven
+          stopLoss:   entry.toFixed(8),
         }).where(eq(trades.id, trade.id!));
 
         await db.update(wolfeWaves)
@@ -461,11 +455,7 @@ export class TradeService {
     }
   }
 
-  // ─── Monitor open trades against latest price ───────────────────────────────
-  //
-  // candlesMap is optional — only needed when TRAILING_STOP_METHOD=structure or atr.
-  // The scanner passes it during the polling cycle (candles already fetched).
-  // In websocket mode it is omitted; trailing stop falls back to percentage mode.
+  // ─── Monitor open trades ───────────────────────────────────────────────────
 
   async checkOpenTrades(
     currentPrices: Record<string, number>,
@@ -510,32 +500,16 @@ export class TradeService {
 
     const isLong = trade.side === 'long';
 
-    // ── En modo real: verificar si la stop order fue activada en el exchange ──
-    // Esto cubre el caso en que el exchange ejecutó el SL pero el bot no lo
-    // detectó todavía (latencia, reinicio, etc.)
-    if (this.mode === 'real' && trade.slOrderId) {
-      try {
-        const slStop = await this.exchange.getStopOrder(trade.symbol, trade.slOrderId);
-        if (slStop.status === 'triggered') {
-          const fillPrice = slStop.triggerPrice > 0 ? slStop.triggerPrice : sl;
-          const remaining = qty - closedQty1 - closedQty2 - closedQty3 - closedQty4;
-          const pnl = this.calcPnl(entry, fillPrice, remaining, isLong);
-          await this.closeTrade(trade.id!, fillPrice, 'sl', pnl);
-          await db.update(wolfeWaves)
-            .set({ hitStopLoss: true })
-            .where(eq(wolfeWaves.id, trade.wolfeWaveId));
-          logger.info('Stop order triggered on exchange — trade closed', {
-            id: trade.id, symbol: trade.symbol, fillPrice,
-          });
-          return;
-        }
-      } catch (err) {
-        logger.warn(`Could not check stop order status for trade #${trade.id}`, err);
-      }
-    }
-
-    // ── Stop Loss (monitoreo por software — doble seguridad en paper mode,
-    //    y fallback en real mode si no hay stop order registrada) ────────────
+    // ── Stop Loss (monitoreo por software) ────────────────────────────────────
+    // El SL se monitorea aquí comparando el precio actual con trade.stopLoss.
+    // La stop order nativa del exchange actúa como red de seguridad si el bot
+    // se cae o pierde conectividad — se reconcilia en reconcileOpenTrades()
+    // al arrancar.
+    //
+    // IMPORTANTE: NO consultamos getStopOrder() en cada tick porque la API de
+    // CoinEx puede tardar unos segundos en reflejar una orden recién creada en
+    // el endpoint de pendientes, lo que causaría falsos positivos (la orden no
+    // aparece en la lista → se interpreta como triggered → cierre incorrecto).
     const slHit = isLong ? currentPrice <= sl : currentPrice >= sl;
     if (slHit) {
       const remaining = qty - closedQty1 - closedQty2 - closedQty3 - closedQty4;
@@ -817,14 +791,6 @@ export class TradeService {
     }
   }
 
-  /**
-   * Calculate the new trailing stop level based on the configured method.
-   * Returns null if no valid level can be computed (e.g. not enough candles).
-   *
-   * - structure:  SL = lowest/highest CLOSE of the last N candles
-   * - percentage: SL = currentPrice ± (currentPrice * trailingStopPct)
-   * - atr:        SL = currentPrice ± (ATR(N) * 1.5)
-   */
   private calcTrailingStop(
     currentPrice: number,
     currentSl:    number,
@@ -839,9 +805,7 @@ export class TradeService {
       return isLong ? currentPrice - offset : currentPrice + offset;
     }
 
-    // Structure and ATR both require recent candles
     if (!candles || candles.length < lookback) {
-      // Fall back to percentage if no candles available (e.g. WS mode)
       const offset = currentPrice * config.trailingStopPct;
       return isLong ? currentPrice - offset : currentPrice + offset;
     }
@@ -849,15 +813,13 @@ export class TradeService {
     const recent = candles.slice(-lookback);
 
     if (method === 'structure') {
-      // Use close prices (Alba Puerro methodology)
       const closes = recent.map(c => c.close);
       return isLong
-        ? Math.min(...closes)   // lowest recent close — SL trails below price
-        : Math.max(...closes);  // highest recent close — SL trails above price
+        ? Math.min(...closes)
+        : Math.max(...closes);
     }
 
     if (method === 'atr') {
-      // ATR = average of |high-low| over last N candles (simplified true range)
       const trValues = recent.map(c => c.high - c.low);
       const atr = trValues.reduce((sum, v) => sum + v, 0) / trValues.length;
       const multiplier = 1.5;

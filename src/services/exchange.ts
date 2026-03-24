@@ -63,7 +63,7 @@ export class CoinExExchange implements IExchange {
 
   getName(): string { return 'CoinEx'; }
 
-  // ─── Signature (CoinEx API v2) ───────────────────────────────────────────
+  // ─── Signature ───────────────────────────────────────────────────────────
 
   private sign(method: string, requestPath: string, body: string, timestamp: string): string {
     const prepared = method.toUpperCase() + requestPath + body + timestamp;
@@ -128,11 +128,10 @@ export class CoinExExchange implements IExchange {
   }): Promise<ExchangeOrder> {
     const requestPath = '/v2/spot/order';
 
-    // Para market buy CoinEx espera el importe en USDT, no la cantidad base
     const isMarketBuy = params.type === 'market' && params.side === 'buy';
     const amount = isMarketBuy
-      ? (params.quantity * (params.price ?? 0)).toFixed(2)  // USDT a gastar
-      : params.quantity.toFixed(8);                          // cantidad base
+      ? (params.quantity * (params.price ?? 0)).toFixed(2)
+      : params.quantity.toFixed(8);
 
     const bodyObj: Record<string, unknown> = {
       market:      params.symbol,
@@ -291,21 +290,27 @@ export class CoinExExchange implements IExchange {
   // ─── Authenticated: Get stop order status ────────────────────────────────
   //
   // CoinEx no tiene un endpoint directo "get single stop order by id".
-  // Usamos la lista de stop orders pendientes y buscamos por stop_id.
-  // Si no está en pendientes, está triggered o cancelled.
+  // Estrategia en dos pasos:
+  //   1. Buscar en la lista de pendientes → si está, status='open'
+  //   2. Si no está en pendientes, buscar en finished (canceladas/expiradas)
+  //      → si está en finished, status='cancelled'
+  //      → si no está en ninguno, fue triggered (se convirtió en orden normal)
+  //
+  // Este método solo se usa en reconcileOpenTrades() al arrancar el bot,
+  // NO en el loop de evaluación de trades (evita falsos positivos por latencia).
 
   async getStopOrder(symbol: string, stopId: string): Promise<ExchangeStopOrder> {
-    const requestPath = `/v2/spot/pending-stop-order?market=${symbol}&market_type=SPOT&page=1&limit=100`;
-
+    // ── Paso 1: buscar en pendientes ─────────────────────────────────────────
     try {
-      const resp = await this.client.get('/spot/pending-stop-order', {
+      const pendingPath = `/v2/spot/pending-stop-order?market=${symbol}&market_type=SPOT&page=1&limit=100`;
+      const pendingResp = await this.client.get('/spot/pending-stop-order', {
         params:  { market: symbol, market_type: 'SPOT', page: 1, limit: 100 },
-        headers: this.authHeaders('GET', requestPath),
+        headers: this.authHeaders('GET', pendingPath),
       });
 
-      this.assertOk(resp.data, 'getStopOrder (pending)');
+      this.assertOk(pendingResp.data, 'getStopOrder (pending)');
 
-      const items: Array<Record<string, unknown>> = resp.data.data?.items ?? [];
+      const items: Array<Record<string, unknown>> = pendingResp.data.data?.items ?? [];
       const found = items.find((o) => String(o.stop_id) === stopId);
 
       if (found) {
@@ -320,9 +325,44 @@ export class CoinExExchange implements IExchange {
           status:       'open',
         };
       }
+    } catch (err) {
+      logger.error('CoinEx getStopOrder (pending) error', formatAxiosError(err));
+      throw err;
+    }
 
-      // No está en pendientes → fue activada (triggered) o cancelada.
-      // Consideramos 'triggered' como estado terminal (equivale a filled para nosotros).
+    // ── Paso 2: buscar en finished (órdenes canceladas sin transacción) ──────
+    // Según la doc de CoinEx, las stop orders canceladas aparecen en
+    // /spot/finished-stop-order. Las que fueron triggered NO aparecen aquí
+    // (se convierten en órdenes normales y desaparecen del historial de stops).
+    try {
+      const finishedPath = `/v2/spot/finished-stop-order?market=${symbol}&market_type=SPOT&page=1&limit=100`;
+      const finishedResp = await this.client.get('/spot/finished-stop-order', {
+        params:  { market: symbol, market_type: 'SPOT', page: 1, limit: 100 },
+        headers: this.authHeaders('GET', finishedPath),
+      });
+
+      this.assertOk(finishedResp.data, 'getStopOrder (finished)');
+
+      const finishedItems: Array<Record<string, unknown>> = finishedResp.data.data ?? [];
+      const foundFinished = finishedItems.find((o) => String(o.stop_id) === stopId);
+
+      if (foundFinished) {
+        // Está en finished → fue cancelada (sin transacción)
+        return {
+          stopId,
+          symbol,
+          side:         foundFinished.side as 'buy' | 'sell',
+          type:         foundFinished.type as 'market' | 'limit',
+          quantity:     Number(foundFinished.amount),
+          triggerPrice: Number(foundFinished.trigger_price),
+          price:        foundFinished.price ? Number(foundFinished.price) : undefined,
+          status:       'cancelled',
+        };
+      }
+    } catch (err) {
+      // Si el endpoint de finished falla, logeamos pero no propagamos —
+      // preferimos asumir 'open' en caso de duda para no cerrar trades incorrectamente.
+      logger.warn('CoinEx getStopOrder (finished) error — asumiendo open', formatAxiosError(err));
       return {
         stopId,
         symbol,
@@ -330,12 +370,20 @@ export class CoinExExchange implements IExchange {
         type:         'market',
         quantity:     0,
         triggerPrice: 0,
-        status:       'triggered',
+        status:       'open',
       };
-    } catch (err) {
-      logger.error('CoinEx getStopOrder error', formatAxiosError(err));
-      throw err;
     }
+
+    // No está en pendientes ni en finished → fue triggered y se convirtió en orden normal
+    return {
+      stopId,
+      symbol,
+      side:         'sell',
+      type:         'market',
+      quantity:     0,
+      triggerPrice: 0,
+      status:       'triggered',
+    };
   }
 
   // ─── Authenticated: Cancel regular order ─────────────────────────────────
