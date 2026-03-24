@@ -125,8 +125,45 @@ export class Scanner {
             if (config.tradingMode === 'real' && wave.direction === 'bearish') {
                 continue;
             }
-            
+
             const candleDurationMs = this.timeframeToMs(timeframe);
+
+            // ── Filtro 1: recencia de P5 ──────────────────────────────────
+            // Si P5 se formó hace más de MAX_P5_AGE_CANDLES velas, la onda
+            // ya es demasiado vieja para entrar — el precio habrá avanzado
+            // y la entrada óptima pasó. Evita que al arrancar el bot se
+            // disparen trades en ondas que empezaron mientras estaba offline.
+            const lastCandleTime = candles[candles.length - 1].timestamp;
+            const p5AgeCandles   = (lastCandleTime - wave.p5.timestamp) / candleDurationMs;
+            const maxP5Age       = this.maxP5AgeCandles(timeframe);
+
+            if (p5AgeCandles > maxP5Age) {
+              logger.debug('Wave skipped: P5 too old', {
+                symbol, timeframe,
+                p5AgeCandles: p5AgeCandles.toFixed(1),
+                maxP5Age,
+              });
+              continue;
+            }
+
+            // ── Filtro 2: deriva de precio desde P5 ───────────────────────
+            // Si el precio actual ya se alejó más de MAX_P5_DRIFT_PCT desde
+            // el precio de P5, la entrada óptima pasó. Evita entradas tardías
+            // en movimientos que ya recorrieron buena parte del camino.
+            const priceDriftPct = Math.abs(latestClose - wave.p5.price) / wave.p5.price;
+            const maxDrift      = this.maxP5DriftPct(timeframe);
+
+            if (priceDriftPct > maxDrift) {
+              logger.debug('Wave skipped: price drifted too far from P5', {
+                symbol, timeframe,
+                p5Price:      wave.p5.price,
+                currentPrice: latestClose,
+                driftPct:     (priceDriftPct * 100).toFixed(2) + '%',
+                maxDriftPct:  (maxDrift * 100).toFixed(2) + '%',
+              });
+              continue;
+            }
+
             const exists = await waveAlreadyExists(wave, candleDurationMs * 5);
             if (exists) continue;
 
@@ -200,6 +237,61 @@ export class Scanner {
 
     logger.debug('Scan cycle complete');
   }
+
+  // ── Filtros de entrada ─────────────────────────────────────────────────────
+
+  /**
+   * Máximo número de velas que puede tener P5 de antigüedad para entrar.
+   * En timeframes cortos el patrón se invalida rápido; en timeframes largos
+   * es normal que P5 se haya formado hace 2-3 velas antes de la detección.
+   *
+   * Nota: el detector ya exige que P5 sea el último pivot del array, así que
+   * en condiciones normales P5 siempre tendrá pocos candles de antigüedad.
+   * Este filtro es principalmente un escudo de arranque (bot offline → bot online).
+   */
+  private maxP5AgeCandles(timeframe: string): number {
+    const map: Record<string, number> = {
+      '1min':  3,
+      '3min':  3,
+      '5min':  3,
+      '15min': 3,
+      '30min': 3,
+      '1hour': 2,
+      '2hour': 2,
+      '4hour': 2,
+      '6hour': 2,
+      '12hour':2,
+      '1day':  2,
+    };
+    return map[timeframe] ?? 3;
+  }
+
+  /**
+   * Máxima deriva porcentual permitida del precio actual respecto a P5.
+   * Si el precio ya se alejó más de este % desde P5, la onda está en marcha
+   * y la relación riesgo/beneficio de la entrada ya no es favorable.
+   *
+   * Se escala con el timeframe: en 1min el mercado se mueve poco entre velas,
+   * en 4H puede haber movimientos del 3-5% intra-vela sin que la onda invalide.
+   */
+  private maxP5DriftPct(timeframe: string): number {
+    const map: Record<string, number> = {
+      '1min':  0.004,   // 0.4%
+      '3min':  0.005,   // 0.5%
+      '5min':  0.006,   // 0.6%
+      '15min': 0.010,   // 1.0%
+      '30min': 0.015,   // 1.5%
+      '1hour': 0.020,   // 2.0%
+      '2hour': 0.025,   // 2.5%
+      '4hour': 0.030,   // 3.0%
+      '6hour': 0.035,   // 3.5%
+      '12hour':0.040,   // 4.0%
+      '1day':  0.050,   // 5.0%
+    };
+    return map[timeframe] ?? 0.015;
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
 
   private async getAvailableCapital(): Promise<number> {
     const balance = await this.exchange.getBalance();
