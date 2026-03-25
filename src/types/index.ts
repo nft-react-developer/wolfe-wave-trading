@@ -228,4 +228,5 @@ export interface AppConfig {
   trailingStopMinMove:  number;
   symbolUpdateCron: string;
   updateSymbolsOnStartup: boolean;
+  minRrRatio: number;
 }

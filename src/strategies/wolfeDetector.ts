@@ -294,10 +294,44 @@ function buildWave(
   const hasDivergence  = hasMACDDivergence(lookbackCandles, direction, lookbackMacd, 5);
   const macdHistogram  = macdResult.histogram[p5.index] ?? NaN;
 
-  logger.debug('Wave built', {
+  logger.info('Wave built', {
     symbol, timeframe, direction, shape, isPerfect, isFatMW,
     p5: p5.price, entry: entryPrice, sl: stopLoss,
     tp1: target1, tp2: target2, divergence: hasDivergence,
+  });
+
+  // ── Risk/Reward check (mínimo configurable, medido sobre TP1) ───────────────
+  // Se usa TP1 (23.6% Fib) como objetivo mínimo — es el primer cierre parcial
+  // (50% de la posición) según la metodología de Alba Puerro.
+  // Si incluso TP1 no ofrece el ratio mínimo sobre el riesgo hasta el SL,
+  // la figura no es operable y se descarta aquí antes de llegar al scanner.
+  //
+  // Fórmula:  reward = |TP1 - entry|
+  //           risk   = |entry - stopLoss|
+  //           ratio  = reward / risk  →  debe ser ≥ config.minRrRatio (default 2)
+  //
+  // Nota: el check sobre TP1 es conservador. En ondas donde TP2 sí cumple
+  // pero TP1 no, también se descarta — se prefiere filtrar más que arriesgar
+  // trades con recorrido insuficiente en el primer objetivo parcial.
+  const rrReward = Math.abs(target2 - entryPrice);
+  const rrRisk   = Math.abs(entryPrice - stopLoss);
+  const rrRatio  = rrRisk > 0 ? rrReward / rrRisk : 0;
+ 
+  if (rrRatio < config.minRrRatio) {
+    logger.info('Wave discarded: R:R insuficiente', {
+      symbol, timeframe, direction,
+      entry: entryPrice, sl: stopLoss, tp1: target1,
+      rrRatio: rrRatio.toFixed(2),
+      minRequired: config.minRrRatio,
+    });
+    return null;
+  }
+ 
+  logger.info('Wave built', {
+    symbol, timeframe, direction, shape, isPerfect, isFatMW,
+    p5: p5.price, entry: entryPrice, sl: stopLoss,
+    tp1: target1, tp2: target2, divergence: hasDivergence,
+    rrRatio: rrRatio.toFixed(2),
   });
 
   return {
