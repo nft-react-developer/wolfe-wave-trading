@@ -5,7 +5,7 @@ import { TradeService, RiskGuard } from '../services/tradeManager';
 import { PollingPriceFeed } from '../services/priceFeed';
 import { config } from '../utils/config';
 import { logger } from '../utils/logger';
-import { telegram } from './telegram';
+
 
 export class Scanner {
   private running = false;
@@ -201,22 +201,7 @@ export class Scanner {
             }
 
             const availableCapital = await this.getAvailableCapital();
-            const tradeOpened = await this.tradeService.openTrade(wave, waveId, availableCapital);
-
-            if (tradeOpened) {
-              await telegram.notifyTradeOpened({
-                id: tradeOpened.id,
-                symbol: tradeOpened.symbol,
-                side: tradeOpened.side,
-                entryPrice: tradeOpened.entryPrice,
-                stopLoss: tradeOpened.stopLoss,
-                target1: tradeOpened.target1,
-                target2: tradeOpened.target2,
-                usdAmount: tradeOpened.usdAmount,
-                quantity: tradeOpened.quantity,
-                mode: tradeOpened.mode,
-              });
-            }
+            await this.tradeService.openTrade(wave, waveId, availableCapital, this.latestCandles[symbol]);
           }
         } catch (err) {
           logger.error(`Error scanning ${symbol}/${timeframe}`, err);

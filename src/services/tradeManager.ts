@@ -1,10 +1,12 @@
 import { eq, and, gte, sql } from 'drizzle-orm';
-import type { WolfeWave, Trade, TradeMode } from '../types';
+import type { WolfeWave, Trade, TradeMode, Candle } from '../types';
 import { getDb, schema } from '../db/connection';
 import type { NewTradeRow } from '../db/schema';
 import type { IExchange } from '../types';
 import { config } from '../utils/config';
 import { logger } from '../utils/logger';
+import { telegram } from './telegram';
+import { generateWaveChart } from '../utils/chartRenderer';
 
 const { trades, wolfeWaves } = schema;
 
@@ -167,6 +169,7 @@ export class TradeService {
     wave: WolfeWave,
     waveId: number,
     availableCapital: number,
+    candles?: Candle[],
   ): Promise<Trade | null> {
     const db = await getDb();
 
@@ -304,6 +307,39 @@ export class TradeService {
       tp1:    wave.target1,
       tp2:    wave.target2,
     });
+    
+     // ── Generate chart image and send Telegram notification ──────────────────
+    // Both steps are fire-and-forget with respect to the trade — if they fail
+    // the trade is already persisted and the bot continues normally.
+    (async () => {
+      try {
+        // Generate PNG chart (null if Python renderer fails)
+        let chartImage: Buffer | null = null;
+        if (candles && candles.length > 0) {
+          chartImage = await generateWaveChart({ wave, candles });
+        }
+ 
+        // Send Telegram notification (with or without chart)
+        await telegram.notifyTradeOpened(
+          {
+            id:         result.insertId,
+            symbol:     wave.symbol,
+            side,
+            mode:       this.mode,
+            entryPrice: wave.entryPrice,
+            stopLoss:   wave.stopLoss,
+            target1:    wave.target1,
+            target2:    wave.target2,
+            usdAmount,
+            quantity,
+          },
+          chartImage,
+        );
+      } catch (err) {
+        // Never let a notification failure surface as a trade error
+        logger.error('Trade notification failed (non-fatal)', err);
+      }
+    })();
 
     return {
       id:           result.insertId,

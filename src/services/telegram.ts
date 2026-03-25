@@ -27,6 +27,38 @@ async function send(message: string): Promise<void> {
   }
 }
 
+/**
+ * Send a photo with an optional HTML caption.
+ * If sending the photo fails we fall back to sending the caption as text,
+ * so the trade notification always reaches the user.
+ */
+async function sendPhoto(imageBuffer: Buffer, caption: string): Promise<void> {
+  const b = getBot();
+  if (!b || !chatId) {
+    logger.debug('Telegram not configured, skipping photo notification');
+    return;
+  }
+
+  try {
+    await b.sendPhoto(
+      chatId,
+      imageBuffer,
+      {
+        caption,
+        parse_mode: 'HTML',
+      },
+      {
+        filename:    'wolfe_wave.png',
+        contentType: 'image/png',
+      }
+    );
+  } catch (err) {
+    logger.error('Telegram sendPhoto failed, falling back to text', err);
+    // Fallback: send just the text caption so the trade notification is not lost
+    await send(caption);
+  }
+}
+
 // ─── Notification templates ───────────────────────────────────────────────────
 
 export const telegram = {
@@ -66,23 +98,31 @@ ${emoji} <b>Wolfe Wave Detected</b> [${modeTag}]
     await send(msg);
   },
 
-  async notifyTradeOpened(trade: {
-    id?: number;
-    symbol: string;
-    side: string;
-    entryPrice: number;
-    stopLoss: number;
-    target1: number;
-    target2: number;
-    usdAmount: number;
-    quantity: number;
-    mode: string;
-  }) {
+  /**
+   * Notify that a trade was opened.
+   * If a chart image buffer is provided it is sent as a photo with the
+   * trade details as caption; otherwise falls back to a plain text message.
+   */
+  async notifyTradeOpened(
+    trade: {
+      id?: number;
+      symbol: string;
+      side: string;
+      entryPrice: number;
+      stopLoss: number;
+      target1: number;
+      target2: number;
+      usdAmount: number;
+      quantity: number;
+      mode: string;
+    },
+    chartImage?: Buffer | null,
+  ) {
     const emoji = trade.side === 'long' ? '📈' : '📉';
     const modeTag = trade.mode === 'paper' ? '📝 PAPER' : '💰 REAL';
 
     const msg = `
-${emoji} <b>Trade Opened</b> [${modeTag}] #${trade.id}
+${emoji} <b>Trade Opened</b> [${modeTag}] #${trade.id ?? '?'}
 
 <b>Symbol:</b> ${trade.symbol}
 <b>Side:</b> ${trade.side.toUpperCase()}
@@ -93,7 +133,12 @@ ${emoji} <b>Trade Opened</b> [${modeTag}] #${trade.id}
 <b>TP2:</b> ${trade.target2.toFixed(6)}
 `.trim();
 
-    await send(msg);
+    if (chartImage && chartImage.length > 0) {
+      // Send trade details as photo caption so the chart and the numbers arrive together
+      await sendPhoto(chartImage, msg);
+    } else {
+      await send(msg);
+    }
   },
 
   async notifyTradeClosed(trade: {

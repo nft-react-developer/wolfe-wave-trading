@@ -6,6 +6,8 @@ import { config } from '../utils/config';
 import { logger } from '../utils/logger';
 import type { TradeMode, IExchange } from '../types';
 import type { Scanner } from '../services/scanner';
+import { telegram } from '../services/telegram';
+
 
 const { wolfeWaves, trades, accountSnapshots } = schema;
 
@@ -486,6 +488,101 @@ router.get('/account/balance', async (_req, res) => {
       },
     });
   });
+
+  /**
+ * GET /api/test/wave-chart?waveId=123
+ * Genera el chart del último wave detectado (o del waveId indicado)
+ * y manda la notificación de Telegram con imagen.
+ * Solo para pruebas — eliminar o proteger en producción.
+ */
+router.get('/test/wave-chart', async (req, res) => {
+  try {
+    const db = await getDb();
+
+    // Usar waveId de query param, o tomar el más reciente
+    let wave;
+    if (req.query.waveId) {
+      [wave] = await db.select().from(wolfeWaves)
+        .where(eq(wolfeWaves.id, Number(req.query.waveId)));
+    } else {
+      [wave] = await db.select().from(wolfeWaves)
+        .orderBy(desc(wolfeWaves.detectedAt))
+        .limit(1);
+    }
+
+    if (!wave) {
+      return res.status(404).json({ error: 'No waves found in DB' });
+    }
+
+    // Buscar las velas desde el exchange
+    const candles = await exchange.getCandles(wave.symbol, wave.timeframe, 200);
+    if (candles.length === 0) {
+      return res.status(500).json({ error: 'Could not fetch candles from exchange' });
+    }
+
+    // Reconstruir el objeto WolfeWave desde la fila de BD
+    const waveObj: import('../types').WolfeWave = {
+      id:         wave.id,
+      symbol:     wave.symbol,
+      timeframe:  wave.timeframe,
+      direction:  wave.direction,
+      p1: { index: wave.p1Index, price: Number(wave.p1Price), timestamp: wave.p1Time },
+      p2: { index: wave.p2Index, price: Number(wave.p2Price), timestamp: wave.p2Time },
+      p3: { index: wave.p3Index, price: Number(wave.p3Price), timestamp: wave.p3Time },
+      p4: { index: wave.p4Index, price: Number(wave.p4Price), timestamp: wave.p4Time },
+      p5: { index: wave.p5Index, price: Number(wave.p5Price), timestamp: wave.p5Time },
+      isPerfect:     wave.isPerfect,
+      shape:         wave.shape,
+      isDoubleWolfe: wave.isDoubleWolfe,
+      entryPrice:    Number(wave.entryPrice),
+      stopLoss:      Number(wave.stopLoss),
+      target1:       Number(wave.target1),
+      target2:       Number(wave.target2),
+      target3:       wave.target3 ? Number(wave.target3) : undefined,
+      target4:       wave.target4 ? Number(wave.target4) : undefined,
+      line14Price:   wave.line14Price ? Number(wave.line14Price) : undefined,
+      ema50:         Number(wave.ema50),
+      macdHistogram: wave.macdHistogram ? Number(wave.macdHistogram) : undefined,
+      detectedAt:    wave.detectedAt,
+    };
+
+    // Generar chart
+    const { generateWaveChart } = await import('../utils/chartRenderer');
+    const chartImage = await generateWaveChart({ wave: waveObj, candles });
+
+    if (!chartImage) {
+      return res.status(500).json({ error: 'Chart generation failed — check python3/pillow' });
+    }
+
+    // Mandar notificación Telegram
+    await telegram.notifyTradeOpened(
+      {
+        id:         wave.id,
+        symbol:     wave.symbol,
+        side:       wave.direction === 'bullish' ? 'long' : 'short',
+        mode:       config.tradingMode,
+        entryPrice: Number(wave.entryPrice),
+        stopLoss:   Number(wave.stopLoss),
+        target1:    Number(wave.target1),
+        target2:    Number(wave.target2),
+        usdAmount:  100, // valor ficticio para el test
+        quantity:   0.001,
+      },
+      chartImage,
+    );
+
+    res.json({
+      ok:      true,
+      waveId:  wave.id,
+      symbol:  wave.symbol,
+      chartKb: (chartImage.length / 1024).toFixed(1),
+    });
+
+  } catch (err) {
+    logger.error('GET /test/wave-chart error', err);
+    res.status(500).json({ error: String(err) });
+  }
+});
 
   // ─── Config ───────────────────────────────────────────────────────────────
 
