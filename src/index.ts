@@ -8,6 +8,7 @@ import { PollingPriceFeed, WebSocketPriceFeed } from './services/priceFeed';
 import { createApp } from './api/routes';
 import { startDailyReportScheduler, startSymbolUpdateScheduler } from './services/scheduler';
 import { snapshotDailyVolumes, getTopSymbols } from './services/symbolSelector';
+import { initTelegramPolling, stopTelegramPolling } from './services/telegram';
 import type { IExchange } from './types';
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
@@ -17,6 +18,7 @@ let scanner: Scanner | null = null;
 async function shutdown(signal: string) {
   logger.info(`Received ${signal}, shutting down...`);
   scanner?.stop();
+  await stopTelegramPolling();
   await closeDb();
   process.exit(0);
 }
@@ -31,6 +33,7 @@ process.on('uncaughtException', (err) => {
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
 async function main() {
+  initTelegramPolling();
   logger.info('=== Wolfe Wave Trading System ===');
   logger.info(`Mode: ${config.tradingMode.toUpperCase()}`);
   logger.info(`Initial Capital: $${config.initialCapital}`);

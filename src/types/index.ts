@@ -214,6 +214,7 @@ export interface AppConfig {
   scanTimeframes: string[];
   scanSymbols: string[];
   scanIntervalMs: number;
+  sendTelegramWolfeDetections: boolean;
   macd: { fast: number; slow: number; signal: number };
   emaPeriod: number;
   apiPort: number;

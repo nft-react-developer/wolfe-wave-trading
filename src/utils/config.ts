@@ -29,6 +29,7 @@ export function loadConfig(): AppConfig {
     initialCapital,
     maxTradeAmount,
     maxTradePct,
+    sendTelegramWolfeDetections: process.env.SEND_TELEGRAM_WOLFE_DETECTIONS === 'true',
     scanTimeframes: parseList(process.env.SCAN_TIMEFRAMES, ['15min', '1hour', '4hour']),
     scanSymbols: parseList(process.env.SCAN_SYMBOLS, ['BTCUSDT', 'ETHUSDT']),
     scanIntervalMs: Number(process.env.SCAN_INTERVAL_MS ?? 60_000),

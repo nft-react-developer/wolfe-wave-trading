@@ -13,7 +13,35 @@ function getBot(): TelegramBot | null {
   return bot;
 }
 
-async function send(message: string): Promise<void> {
+export function initTelegramPolling(): void {
+  const b = getBot();
+  if (!b) return;
+
+  b.startPolling();
+
+  b.on('callback_query', (query) => {
+    console.log('[Telegram] callback_query received:', {
+      data:     query.data,
+      from:     query.from.username ?? query.from.id,
+      message:  query.message?.text ?? query.message?.caption,
+    });
+    // Acknowledge so Telegram removes the "loading" spinner on the button
+    b.answerCallbackQuery(query.id).catch(() => {});
+  });
+
+  logger.info('Telegram polling started — callback queries enabled');
+}
+
+export async function stopTelegramPolling(): Promise<void> {
+  if (!bot) return;
+  await bot.stopPolling();
+  logger.info('Telegram polling stopped');
+}
+
+async function send(
+  message: string,
+  replyMarkup?: TelegramBot.InlineKeyboardMarkup,
+): Promise<void> {
   const b = getBot();
   if (!b || !chatId) {
     logger.debug('Telegram not configured, skipping notification');
@@ -21,7 +49,7 @@ async function send(message: string): Promise<void> {
   }
 
   try {
-    await b.sendMessage(chatId, message, { parse_mode: 'HTML' });
+    await b.sendMessage(chatId, message, { parse_mode: 'HTML', reply_markup: replyMarkup });
   } catch (err) {
     logger.error('Telegram send failed', err);
   }
@@ -32,7 +60,11 @@ async function send(message: string): Promise<void> {
  * If sending the photo fails we fall back to sending the caption as text,
  * so the trade notification always reaches the user.
  */
-async function sendPhoto(imageBuffer: Buffer, caption: string): Promise<void> {
+async function sendPhoto(
+  imageBuffer: Buffer,
+  caption: string,
+  replyMarkup?: TelegramBot.InlineKeyboardMarkup,
+): Promise<void> {
   const b = getBot();
   if (!b || !chatId) {
     logger.debug('Telegram not configured, skipping photo notification');
@@ -46,6 +78,7 @@ async function sendPhoto(imageBuffer: Buffer, caption: string): Promise<void> {
       {
         caption,
         parse_mode: 'HTML',
+        reply_markup: replyMarkup,
       },
       {
         filename:    'wolfe_wave.png',
@@ -54,27 +87,30 @@ async function sendPhoto(imageBuffer: Buffer, caption: string): Promise<void> {
     );
   } catch (err) {
     logger.error('Telegram sendPhoto failed, falling back to text', err);
-    // Fallback: send just the text caption so the trade notification is not lost
-    await send(caption);
+    await send(caption, replyMarkup);
   }
 }
 
 // ─── Notification templates ───────────────────────────────────────────────────
 
 export const telegram = {
-  async notifyWaveDetected(wave: {
-    symbol: string;
-    timeframe: string;
-    direction: string;
-    shape: string;
-    isPerfect: boolean;
-    entryPrice: number;
-    stopLoss: number;
-    target1: number;
-    target2: number;
-    target3?: number;
-    ema50: number;
-  }) {
+  async notifyWaveDetected(
+    wave: {
+      symbol: string;
+      timeframe: string;
+      direction: string;
+      shape: string;
+      isPerfect: boolean;
+      entryPrice: number;
+      stopLoss: number;
+      target1: number;
+      target2: number;
+      target3?: number;
+      ema50: number;
+    },
+    chartImage?: Buffer | null,
+    waveId?: number,
+  ) {
     const emoji = wave.direction === 'bullish' ? '🟢' : '🔴';
     const mode = process.env.TRADING_MODE ?? 'paper';
     const modeTag = mode === 'paper' ? '📝 PAPER' : '💰 REAL';
@@ -95,7 +131,17 @@ ${emoji} <b>Wolfe Wave Detected</b> [${modeTag}]
 <b>EMA50:</b> ${wave.ema50.toFixed(6)}
 `.trim();
 
-    await send(msg);
+    const replyMarkup: TelegramBot.InlineKeyboardMarkup = {
+      inline_keyboard: [[
+        { text: '🚀 Open Trade', callback_data: `open_trade:${waveId ?? 0}` },
+      ]],
+    };
+
+    if (chartImage && chartImage.length > 0) {
+      await sendPhoto(chartImage, msg, replyMarkup);
+    } else {
+      await send(msg, replyMarkup);
+    }
   },
 
   /**

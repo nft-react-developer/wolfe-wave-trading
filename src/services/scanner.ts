@@ -5,6 +5,8 @@ import { TradeService, RiskGuard } from '../services/tradeManager';
 import { PollingPriceFeed } from '../services/priceFeed';
 import { config } from '../utils/config';
 import { logger } from '../utils/logger';
+import { telegram } from '../services/telegram';
+import { generateWaveChart } from '../utils/chartRenderer';
 
 
 export class Scanner {
@@ -169,20 +171,27 @@ export class Scanner {
 
             const waveId = await saveWave(wave);
 
-            // // Telegram wave notification disabled — only daily report is sent
-            // await telegram.notifyWaveDetected({
-            //   symbol: wave.symbol,
-            //   timeframe: wave.timeframe,
-            //   direction: wave.direction,
-            //   shape: wave.shape,
-            //   isPerfect: wave.isPerfect,
-            //   entryPrice: wave.entryPrice,
-            //   stopLoss: wave.stopLoss,
-            //   target1: wave.target1,
-            //   target2: wave.target2,
-            //   target3: wave.target3,
-            //   ema50: wave.ema50,
-            // });
+            const waveChartImage = await generateWaveChart({ wave, candles });
+
+            if (config.sendTelegramWolfeDetections) {
+            await telegram.notifyWaveDetected(
+              {
+                symbol:     wave.symbol,
+                timeframe:  wave.timeframe,
+                direction:  wave.direction,
+                shape:      wave.shape,
+                isPerfect:  wave.isPerfect,
+                entryPrice: wave.entryPrice,
+                stopLoss:   wave.stopLoss,
+                target1:    wave.target1,
+                target2:    wave.target2,
+                target3:    wave.target3,
+                ema50:      wave.ema50,
+              },
+              waveChartImage,
+              waveId,
+            );
+          }
 
             const hasOpenTrade = await tradeAlreadyOpenForWave(wave, candleDurationMs * 10);
             if (hasOpenTrade) {
