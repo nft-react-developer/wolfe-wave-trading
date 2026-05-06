@@ -13,20 +13,58 @@ function getBot(): TelegramBot | null {
   return bot;
 }
 
-export function initTelegramPolling(): void {
+export interface TelegramHandlers {
+  onOpenTrade: (waveId: number) => Promise<void>;
+}
+
+export function initTelegramPolling(handlers?: TelegramHandlers): void {
   const b = getBot();
   if (!b) return;
 
   b.startPolling();
 
-  b.on('callback_query', (query) => {
+  b.on('callback_query', async (query) => {
+    const data = query.data ?? '';
     console.log('[Telegram] callback_query received:', {
-      data:     query.data,
-      from:     query.from.username ?? query.from.id,
-      message:  query.message?.text ?? query.message?.caption,
+      data,
+      from:    query.from.username ?? query.from.id,
+      message: query.message?.text ?? query.message?.caption,
     });
-    // Acknowledge so Telegram removes the "loading" spinner on the button
+    // Always acknowledge first to clear the spinner
     b.answerCallbackQuery(query.id).catch(() => {});
+
+    if (data.startsWith('open_trade:') && handlers?.onOpenTrade) {
+      const waveId = parseInt(data.split(':')[1], 10);
+      if (isNaN(waveId) || waveId <= 0) return;
+
+      const msg = query.message;
+      // Disable the button immediately to prevent double-clicks
+      if (msg) {
+        b.editMessageReplyMarkup(
+          { inline_keyboard: [[{ text: '⏳ Opening trade…', callback_data: 'noop' }]] },
+          { chat_id: msg.chat.id, message_id: msg.message_id },
+        ).catch(() => {});
+      }
+
+      try {
+        await handlers.onOpenTrade(waveId);
+        if (msg) {
+          b.editMessageReplyMarkup(
+            { inline_keyboard: [[{ text: '✅ Trade Opened', callback_data: 'noop' }]] },
+            { chat_id: msg.chat.id, message_id: msg.message_id },
+          ).catch(() => {});
+        }
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        logger.error('[Telegram] onOpenTrade handler failed', err);
+        if (msg) {
+          b.editMessageReplyMarkup(
+            { inline_keyboard: [[{ text: `❌ ${reason}`, callback_data: 'noop' }]] },
+            { chat_id: msg.chat.id, message_id: msg.message_id },
+          ).catch(() => {});
+        }
+      }
+    }
   });
 
   logger.info('Telegram polling started — callback queries enabled');

@@ -33,9 +33,9 @@ process.on('uncaughtException', (err) => {
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
 async function main() {
-  initTelegramPolling();
   logger.info('=== Wolfe Wave Trading System ===');
   logger.info(`Mode: ${config.tradingMode.toUpperCase()}`);
+  logger.info(`Entry Mode: ${config.entryMode.toUpperCase()}`);
   logger.info(`Initial Capital: $${config.initialCapital}`);
   logger.info(`Max Trade Amount: $${config.maxTradeAmount}`);
   logger.info(`Symbols: ${config.scanSymbols.join(', ')}`);
@@ -66,6 +66,14 @@ async function main() {
 
   scanner = new Scanner(exchange, priceFeed);
   scanner.start();
+
+  // Telegram polling starts after scanner exists so we can pass the manual-trade handler
+  initTelegramPolling({
+    onOpenTrade: async (waveId) => {
+      if (!scanner) throw new Error('Scanner not initialized');
+      await scanner.openManualTrade(waveId);
+    },
+  });
 
   // ─── Daily report scheduler ───────────────────────────────────────────
 

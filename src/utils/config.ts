@@ -55,6 +55,7 @@ export function loadConfig(): AppConfig {
     symbolUpdateCron: process.env.SYMBOL_UPDATE_CRON ?? '5 0 * * *',
     updateSymbolsOnStartup: process.env.UPDATE_SYMBOLS_ON_STARTUP === 'true',
     minRrRatio: Number(process.env.MIN_RR_RATIO ?? 2),
+    entryMode: (process.env.ENTRY_MODE ?? 'auto') as 'auto' | 'manual',
   };
 }
 

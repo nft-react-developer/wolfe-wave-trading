@@ -53,6 +53,7 @@ export interface WolfeWave {
 export type TradeSide = 'long' | 'short';
 export type TradeStatus = 'open' | 'closed' | 'cancelled';
 export type TradeMode = 'paper' | 'real';
+export type EntryMode = 'auto' | 'manual';
 export type CloseReason = 'tp1' | 'tp2' | 'tp3' | 'tp4' | 'sl' | 'manual' | 'timeout';
 
 export interface Trade {
@@ -230,4 +231,5 @@ export interface AppConfig {
   symbolUpdateCron: string;
   updateSymbolsOnStartup: boolean;
   minRrRatio: number;
+  entryMode: EntryMode;
 }

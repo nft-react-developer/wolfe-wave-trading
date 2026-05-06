@@ -1,6 +1,6 @@
 import type { IExchange, IPriceFeed } from '../types';
 import { detectWolfeWaves } from '../strategies/wolfeDetector';
-import { saveWave, tradeAlreadyOpenForWave, waveAlreadyExists } from '../services/waveRepository';
+import { saveWave, tradeAlreadyOpenForWave, waveAlreadyExists, getWaveById } from '../services/waveRepository';
 import { TradeService, RiskGuard } from '../services/tradeManager';
 import { PollingPriceFeed } from '../services/priceFeed';
 import { config } from '../utils/config';
@@ -83,6 +83,25 @@ export class Scanner {
   pause():    void    { this.riskGuard.pause();    }
   resume():   void    { this.riskGuard.resume();   }
   isPaused(): boolean { return this.riskGuard.isPaused(); }
+
+  public async openManualTrade(waveId: number): Promise<void> {
+    const wave = await getWaveById(waveId);
+    if (!wave) throw new Error('Wave not found');
+
+    const candleDurationMs = this.timeframeToMs(wave.timeframe);
+
+    const hasOpenTrade = await tradeAlreadyOpenForWave(wave, candleDurationMs * 10);
+    if (hasOpenTrade) throw new Error('Trade already open for this wave');
+
+    const riskCheck = await this.riskGuard.canOpenTrade(wave.symbol);
+    if (!riskCheck.allowed) throw new Error(riskCheck.reason ?? 'Risk check failed');
+
+    const candles = await this.exchange.getCandles(wave.symbol, wave.timeframe, 200);
+    const availableCapital = await this.getAvailableCapital();
+
+    await this.tradeService.openTrade(wave, waveId, availableCapital, candles);
+    logger.info('Manual trade opened via Telegram', { waveId, symbol: wave.symbol, timeframe: wave.timeframe });
+  }
 
   // ── Scan cycle ─────────────────────────────────────────────────────────────
   // Runs every SCAN_INTERVAL_MS regardless of price feed mode.
@@ -167,7 +186,12 @@ export class Scanner {
             }
 
             const exists = await waveAlreadyExists(wave, candleDurationMs * 5);
-            if (exists) continue;
+            if (exists) {
+              logger.debug('Wave skipped: already exists in DB (dedup)', {
+                symbol, timeframe, direction: wave.direction, p5: wave.p5.price,
+              });
+              continue;
+            }
 
             const waveId = await saveWave(wave);
 
@@ -192,6 +216,9 @@ export class Scanner {
               waveId,
             );
           }
+
+            // In manual mode the Telegram button triggers the trade — skip auto-opening.
+            if (config.entryMode === 'manual') continue;
 
             const hasOpenTrade = await tradeAlreadyOpenForWave(wave, candleDurationMs * 10);
             if (hasOpenTrade) {
