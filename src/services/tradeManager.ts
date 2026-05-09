@@ -951,5 +951,21 @@ export class TradeService {
       id: tradeId, reason, exitPrice,
       pnl: pnl.toFixed(2), pnlPct: pnlPct.toFixed(2),
     });
+
+    telegram.notifyTradeClosed({
+      id:          tradeId,
+      symbol:      trade.symbol,
+      side:        trade.side,
+      entryPrice:  Number(trade.entryPrice),
+      exitPrice,
+      pnl,
+      pnlPct,
+      closeReason: reason,
+      mode:        trade.mode,
+      usdAmount,
+      entryTime:   Number(trade.entryTime),
+      closedQty1:  Number(trade.closedQty1),
+      closedQty2:  Number(trade.closedQty2),
+    }).catch(err => logger.error('Failed to send trade closed notification', err));
   }
 }

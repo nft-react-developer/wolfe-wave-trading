@@ -235,10 +235,24 @@ ${emoji} <b>Trade Opened</b> [${modeTag}] #${trade.id ?? '?'}
     pnlPct: number;
     closeReason: string;
     mode: string;
+    usdAmount: number;
+    entryTime: number;
+    closedQty1: number;
+    closedQty2: number;
   }) {
     const won = trade.pnl >= 0;
     const emoji = won ? '✅' : '❌';
     const modeTag = trade.mode === 'paper' ? '📝 PAPER' : '💰 REAL';
+
+    const durationMs = Date.now() - trade.entryTime;
+    const hours   = Math.floor(durationMs / 3_600_000);
+    const minutes = Math.floor((durationMs % 3_600_000) / 60_000);
+    const duration = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+
+    const targetsHit: string[] = [];
+    if (trade.closedQty1 > 0) targetsHit.push('TP1 ✅');
+    if (trade.closedQty2 > 0) targetsHit.push('TP2 ✅');
+    const targetsLine = targetsHit.length > 0 ? targetsHit.join(' | ') : '—';
 
     const msg = `
 ${emoji} <b>Trade Closed</b> [${modeTag}] #${trade.id}
@@ -248,6 +262,9 @@ ${emoji} <b>Trade Closed</b> [${modeTag}] #${trade.id}
 <b>Entry:</b> ${trade.entryPrice.toFixed(6)} → <b>Exit:</b> ${trade.exitPrice.toFixed(6)}
 <b>Reason:</b> ${trade.closeReason.toUpperCase()}
 <b>PnL:</b> ${won ? '+' : ''}$${trade.pnl.toFixed(2)} (${trade.pnlPct.toFixed(2)}%)
+<b>Amount:</b> $${trade.usdAmount.toFixed(2)}
+<b>Duration:</b> ${duration}
+<b>Targets hit:</b> ${targetsLine}
 `.trim();
 
     await send(msg);
