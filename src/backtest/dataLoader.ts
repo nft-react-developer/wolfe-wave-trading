@@ -71,36 +71,56 @@ function writeCache(file: string, candles: Candle[]): void {
 }
 
 // ─── Fetch de un batch desde CoinEx ───────────────────────────────────────────
-// Nota: la API V2 no permite paginar hacia atrás explícitamente, devuelve las
-// últimas N velas. Para series largas usamos `end_time` para pivotar.
+// CoinEx V2 (/v2/spot/kline) NO acepta paginación por timestamp. Sólo devuelve
+// las últimas `limit` velas (max ~1000). Para reconstruir histórico largo
+// no hay endpoint público — la mejor opción es ir acumulando con cada corrida
+// y usar cache local.
+
+interface CoinExKlineRaw {
+  created_at: number;
+  open:   string;
+  close:  string;
+  high:   string;
+  low:    string;
+  volume: string;
+}
 
 async function fetchBatch(
   symbol: string,
   timeframe: string,
   limit: number,
-  endTimeMs?: number,
+  _endTimeMs?: number,            // prefix _ — V2 no lo soporta, lo dejamos por compat
 ): Promise<Candle[]> {
-  const params: Record<string, unknown> = {
-    market:  symbol,
-    period:  timeframe,
-    limit,
-  };
-  if (endTimeMs) {
-    // CoinEx V2 acepta `end_time` en segundos en algunos endpoints;
-    // probamos con `before` (timestamp ms) como query auxiliar.
-    // Si no es soportado, devolverá las últimas N velas — caller filtrará.
-    params.end_time = Math.floor(endTimeMs / 1000);
-  }
+  // CoinEx V2 limita a 1000 velas por request
+  const cappedLimit = Math.min(Math.max(limit, 1), 1000);
 
   try {
-    const resp = await axios.get(COINEX_BASE + KLINE_PATH, { params, timeout: 15_000 });
-    const raw: Array<{
-      created_at: number;
-      open: string; close: string; high: string; low: string; volume: string;
-    }> = resp.data?.data ?? [];
+    const resp = await axios.get(COINEX_BASE + KLINE_PATH, {
+      params: { market: symbol, period: timeframe, limit: cappedLimit },
+      timeout: 15_000,
+    });
 
-    return raw.map((k) => ({
-      timestamp: k.created_at,
+    // CoinEx V2 envuelve la respuesta en { code, data, message }
+    // Cuando hay error, `data` puede ser null/string/objeto — protegerse.
+    const body = resp.data;
+
+    if (body?.code !== undefined && body.code !== 0) {
+      logger.error(
+        `CoinEx ${symbol}/${timeframe} respondió con error code=${body.code}: ${body.message ?? '(sin mensaje)'}`,
+      );
+      return [];
+    }
+
+    const raw = body?.data;
+    if (!Array.isArray(raw)) {
+      logger.error(
+        `CoinEx ${symbol}/${timeframe} data no es array. Body: ${JSON.stringify(body).slice(0, 300)}`,
+      );
+      return [];
+    }
+
+    return (raw as CoinExKlineRaw[]).map((k) => ({
+      timestamp: Number(k.created_at),
       open:   Number(k.open),
       high:   Number(k.high),
       low:    Number(k.low),
@@ -165,39 +185,45 @@ export async function loadCandles(
     );
   }
 
-  // Heurística para llenar el rango:
-  // 1. Si cache cubre el inicio → top-up hacia el final
-  // 2. Si cache es vacío o no cubre → iterar batches hacia atrás desde endTs
-  //    hasta cubrir startTs
+  // CoinEx V2 NO soporta paginación por timestamp en /spot/kline — sólo
+  // devuelve las últimas N velas (max 1000). Para histórico profundo hay
+  // que acumular cache corriendo el loader periódicamente.
+  //
+  // Estrategia:
+  //   1. Top-up con últimas 1000 velas y mergear con cache existente.
+  //   2. Filtrar por rango pedido.
+  //   3. Si el rango pedido no se cubre, avisar al usuario en el log.
   const desiredStart = startTs ?? (endTs ?? Date.now()) - 1000 * tfMs;
   const desiredEnd   = endTs   ?? Date.now();
 
   let merged = [...cached];
-
-  // Top-up al final (velas más recientes)
-  const cacheEnd = merged.length > 0 ? merged[merged.length - 1].timestamp : 0;
-  if (cacheEnd < desiredEnd) {
-    const recent = await fetchBatch(symbol, timeframe, 1000);
-    merged = mergeCandles(merged, recent);
-  }
-
-  // Extender hacia atrás si no cubrimos desiredStart
-  let cacheStart = merged.length > 0 ? merged[0].timestamp : desiredEnd;
-  let safetyIter = 0;
-  while (cacheStart > desiredStart && safetyIter < 50) {
-    safetyIter++;
-    const batch = await fetchBatch(symbol, timeframe, 1000, cacheStart - tfMs);
-    if (batch.length === 0) break;
-    const before = merged.length;
-    merged = mergeCandles(merged, batch);
-    if (merged.length === before) break;     // sin nuevas velas → la API no extiende más
-    cacheStart = merged[0].timestamp;
-    await sleep(150);                        // rate-limit cortés
-  }
-
+  const recent = await fetchBatch(symbol, timeframe, 1000);
+  merged = mergeCandles(merged, recent);
   writeCache(file, merged);
 
-  return merged.filter((c) => c.timestamp >= desiredStart && c.timestamp <= desiredEnd);
+  const result = merged.filter(
+    (c) => c.timestamp >= desiredStart && c.timestamp <= desiredEnd,
+  );
+
+  if (result.length === 0) {
+    logger.warn(
+      `loadCandles: 0 velas en el rango ${new Date(desiredStart).toISOString()} → ${new Date(desiredEnd).toISOString()} para ${symbol}/${timeframe}. ` +
+      `Cache tiene ${merged.length} velas, oldest: ${merged.length > 0 ? new Date(merged[0].timestamp).toISOString() : 'n/a'}. ` +
+      `CoinEx V2 sólo retorna las últimas 1000 velas — para histórico profundo hay que correr el loader periódicamente y dejar que se acumule el cache.`,
+    );
+  } else if (merged.length > 0 && merged[0].timestamp > desiredStart) {
+    logger.warn(
+      `loadCandles: rango pedido empieza antes del cache (${new Date(desiredStart).toISOString()} vs cache desde ${new Date(merged[0].timestamp).toISOString()}). ` +
+      `Se backtesteará desde donde alcanza el cache.`,
+    );
+  }
+
+  // Mantener referencia silenciada al sleep helper (lo usaba el viejo loop
+  // de paginación). Lo dejamos en el archivo por si re-implementamos
+  // paginación cuando CoinEx la soporte.
+  void sleep;
+
+  return result;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

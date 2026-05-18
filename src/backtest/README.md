@@ -49,6 +49,28 @@ tsx src/backtest/cli.ts --symbol ETHUSDT --timeframe 4hour \
 
 Flags disponibles: ver comentario en `cli.ts`.
 
+## Limitación de datos de CoinEx V2
+
+El endpoint `/v2/spot/kline` de CoinEx V2 **no soporta paginación por timestamp**
+— sólo devuelve las últimas N velas (máx 1000 por request). Eso significa:
+
+- **Una corrida sola** sólo accede a ~1000 velas hacia atrás. En 1hour son
+  ~41 días; en 4hour son ~166 días; en 1day son ~1000 días.
+- Para histórico profundo, hay dos opciones:
+  1. **Cache incremental**: correr el loader (o el bot en producción) cada
+     pocos días. Cada corrida agrega lo nuevo al cache JSON local. Después
+     de N corridas el cache cubre N × ~1000 velas hacia atrás.
+  2. **Cargar datos externos**: bajar histórico de otra fuente (Binance,
+     ccxt, Kaggle, etc.) y dejarlo como JSON en `backtest/data/<SYMBOL>_<TF>.json`
+     con el shape:
+     ```json
+     [{"timestamp":1700000000000,"open":...,"high":...,"low":...,"close":...,"volume":...}]
+     ```
+     El loader lo lee tal cual.
+
+Si pasás `--from` con una fecha anterior al cache, el loader avisa en log
+y corre con lo que tenga disponible.
+
 ## Reglas del replay (no look-ahead)
 
 1. En cada paso `i`, se pasa al detector el slice `candles[0..i+1]`.
