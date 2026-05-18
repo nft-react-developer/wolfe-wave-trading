@@ -141,3 +141,4 @@ vite.config.ts.timestamp-*
 files/.DS_Store
 .DS_Store
 env.example
+backtest/reports/*USDT*
